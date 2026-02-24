@@ -52,10 +52,12 @@ async def _run_tts(
     voice: str, speed: float,
 ):
     try:
+        completed = 0
         async for idx, path in generate_all_chunks(paper_id, sections, voice, speed):
+            completed += 1
             update_task(
-                task_id, status="running", current_chunk=idx + 1,
-                message=f"Generated audio for chunk {idx + 1}/{len(sections)}"
+                task_id, status="running", current_chunk=completed,
+                message=f"Generated audio {completed}/{len(sections)} (chunk {idx + 1})"
             )
         update_task(task_id, status="completed", message="TTS generation complete")
     except Exception as e:

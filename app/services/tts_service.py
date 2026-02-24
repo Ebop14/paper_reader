@@ -1,32 +1,45 @@
 import asyncio
 import functools
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from app.config import settings
 from app.storage import audio_dir
 
-# Lazy-loaded model state
-_model = None
-_lock = asyncio.Lock()
+# Process pool — each worker loads its own MLX model (MLX is not thread-safe,
+# but separate processes each get their own Metal context).
+_executor: ProcessPoolExecutor | None = None
 
 
-def _load_model():
-    """Lazy-load the TTS model on first use."""
-    global _model
-    if _model is not None:
-        return _model
+def _get_executor() -> ProcessPoolExecutor:
+    global _executor
+    if _executor is None:
+        _executor = ProcessPoolExecutor(
+            max_workers=settings.tts_workers,
+            initializer=_init_worker,
+            initargs=(settings.tts_model,),
+        )
+    return _executor
+
+
+# --- Worker process globals (one per process) ---
+
+_worker_model = None
+
+
+def _init_worker(model_name: str):
+    """Called once when each worker process starts. Loads the TTS model."""
+    global _worker_model
     from mlx_audio.tts import load_model
-    _model = load_model(settings.tts_model)
-    return _model
+    _worker_model = load_model(model_name)
 
 
 def _generate_sync(text: str, voice: str, speed: float, out_dir: str, file_prefix: str):
-    """Run TTS generation synchronously (called in executor via lock)."""
+    """Run TTS generation synchronously inside a worker process."""
     from mlx_audio.tts.generate import generate_audio
-    model = _load_model()
     generate_audio(
         text=text,
-        model=model,
+        model=_worker_model,
         voice=voice,
         speed=speed,
         output_path=out_dir,
@@ -37,6 +50,8 @@ def _generate_sync(text: str, voice: str, speed: float, out_dir: str, file_prefi
         verbose=False,
     )
 
+
+# --- Async API (called from FastAPI) ---
 
 async def generate_chunk(
     paper_id: str, chunk_index: int, text: str,
@@ -51,19 +66,18 @@ async def generate_chunk(
     if output_path.exists():
         return output_path
 
-    async with _lock:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            functools.partial(
-                _generate_sync,
-                text=text,
-                voice=voice,
-                speed=speed,
-                out_dir=str(out_dir),
-                file_prefix=file_prefix,
-            ),
-        )
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(
+        _get_executor(),
+        functools.partial(
+            _generate_sync,
+            text=text,
+            voice=voice,
+            speed=speed,
+            out_dir=str(out_dir),
+            file_prefix=file_prefix,
+        ),
+    )
     return output_path
 
 
@@ -71,9 +85,19 @@ async def generate_all_chunks(
     paper_id: str, sections: list[dict],
     voice: str = "serena", speed: float = 1.0,
 ):
-    """Generate TTS for all sections, yielding (index, path) as each completes."""
+    """Generate TTS for all sections concurrently, yielding (index, path) as each completes."""
+    results: asyncio.Queue[tuple[int, Path]] = asyncio.Queue()
+
+    async def _run(idx: int, text: str):
+        path = await generate_chunk(paper_id, idx, text, voice, speed)
+        await results.put((idx, path))
+
+    tasks = []
     for section in sections:
         idx = section["chunk_index"]
-        text = section["text"]
-        path = await generate_chunk(paper_id, idx, text, voice, speed)
+        task = asyncio.create_task(_run(idx, section["text"]))
+        tasks.append(task)
+
+    for _ in range(len(sections)):
+        idx, path = await results.get()
         yield idx, path

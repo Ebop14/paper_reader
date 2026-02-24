@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -5,7 +7,17 @@ from pathlib import Path
 
 from app.routers import papers, tts, music, mix
 
-app = FastAPI(title="Paper Reader")
+
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    # Shut down the TTS process pool cleanly to avoid leaked semaphore warnings
+    from app.services.tts_service import _executor
+    if _executor is not None:
+        _executor.shutdown(wait=False)
+
+
+app = FastAPI(title="Paper Reader", lifespan=lifespan)
 
 app.include_router(papers.router)
 app.include_router(tts.router)

@@ -94,6 +94,7 @@ main {
     border: 1px solid var(--border);
 }
 .btn-secondary:hover { background: var(--border); }
+.btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .btn-icon {
     background: var(--surface-2);
@@ -327,6 +328,36 @@ main {
     font-size: 0.8rem;
     color: var(--text-dim);
     min-width: 30px;
+}
+
+/* MusicGen controls */
+.musicgen-controls {
+    margin-top: 0.75rem;
+}
+
+.musicgen-controls .text-input {
+    width: 100%;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.5rem 0.6rem;
+    font-size: 0.82rem;
+    font-family: inherit;
+    margin-bottom: 0.5rem;
+}
+
+.musicgen-controls .text-input::placeholder {
+    color: var(--text-dim);
+}
+
+.musicgen-controls .text-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.musicgen-controls .btn {
+    margin-top: 0.4rem;
 }
 
 /* Music list */

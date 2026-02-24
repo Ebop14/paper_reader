@@ -1,11 +1,14 @@
 import uuid
 import json
+import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, UploadFile, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.storage import music_dir
+from app.models import MusicGenerateRequest
+from app.tasks.processing import create_task, update_task, sse_stream
 
 router = APIRouter(prefix="/api/music", tags=["music"])
 
@@ -32,6 +35,45 @@ async def upload_music(file: UploadFile):
     (mdir / f"{music_id}.json").write_text(json.dumps(meta))
 
     return meta
+
+
+@router.post("/generate")
+async def generate_music(req: MusicGenerateRequest):
+    music_id = uuid.uuid4().hex[:12]
+    task_id = f"musicgen-{music_id}"
+    mdir = music_dir()
+    mdir.mkdir(parents=True, exist_ok=True)
+    output_path = mdir / f"{music_id}.wav"
+
+    create_task(task_id, total_chunks=0)
+    update_task(task_id, progress=0.0, message="Loading MusicGen model...")
+
+    async def _run():
+        try:
+            from app.services.music_gen_service import generate_music as gen
+
+            update_task(task_id, progress=0.5, message="Generating music...")
+            await gen(req.prompt, req.duration, output_path)
+
+            # Save metadata in same format as uploads
+            display_name = req.prompt[:50]
+            if len(req.prompt) > 50:
+                display_name += "..."
+            filename = f"Generated: {display_name}"
+            meta = {"id": music_id, "filename": filename, "path": str(output_path)}
+            (mdir / f"{music_id}.json").write_text(json.dumps(meta))
+
+            update_task(task_id, status="completed", progress=1.0, message="Done")
+        except Exception as e:
+            update_task(task_id, status="failed", message=str(e))
+
+    asyncio.create_task(_run())
+    return {"task_id": task_id, "music_id": music_id}
+
+
+@router.get("/generate/stream")
+async def stream_music_gen(task_id: str):
+    return StreamingResponse(sse_stream(task_id), media_type="text/event-stream")
 
 
 @router.get("")

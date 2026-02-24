@@ -79,6 +79,20 @@ const API = {
         await fetch(`/api/music/${musicId}`, { method: 'DELETE' });
     },
 
+    async generateMusic(prompt, duration) {
+        const res = await fetch('/api/music/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt, duration }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        return res.json();
+    },
+
+    streamMusicGen(taskId, onEvent) {
+        return this._sse(`/api/music/generate/stream?task_id=${taskId}`, onEvent);
+    },
+
     async exportMix(paperId, musicId, speechVol, musicVol) {
         const res = await fetch('/api/mix/export', {
             method: 'POST',

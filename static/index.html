@@ -103,13 +103,23 @@
                 </div>
             </div>
 
-            <!-- Music Upload -->
+            <!-- Music Upload & Generate -->
             <div class="music-section">
                 <h3>Background Music</h3>
                 <input type="file" id="music-input" accept=".mp3,.wav,.ogg,.m4a,.flac" hidden>
                 <button class="btn btn-secondary" onclick="document.getElementById('music-input').click()">
                     Upload Music
                 </button>
+                <div class="musicgen-controls">
+                    <input type="text" id="musicgen-prompt" class="text-input"
+                           value="lo-fi hip hop beats, relaxing, soft piano, ambient study music"
+                           placeholder="Describe the vibe...">
+                    <button class="btn btn-secondary" id="btn-generate-music">Generate Music</button>
+                </div>
+                <div class="progress-bar" id="musicgen-progress" style="display:none">
+                    <div class="progress-fill" id="musicgen-progress-fill"></div>
+                    <span class="progress-label" id="musicgen-progress-label"></span>
+                </div>
                 <ul id="music-list" class="music-list"></ul>
             </div>
 

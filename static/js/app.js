@@ -57,6 +57,9 @@ const App = {
             if (e.target.files[0]) this.uploadMusic(e.target.files[0]);
         };
 
+        // Music generation
+        UI.$('btn-generate-music').onclick = () => this.generateMusic();
+
         // Export
         UI.$('btn-export').onclick = () => this.exportMix();
 
@@ -276,6 +279,36 @@ const App = {
             this.state.musicList, music.id,
             (m) => this.selectMusic(m), (id) => this.removeMusic(id),
         );
+    },
+
+    async generateMusic() {
+        const prompt = UI.$('musicgen-prompt').value.trim()
+            || 'lo-fi hip hop beats, relaxing, soft piano, ambient study music';
+        const duration = 30;
+
+        UI.$('btn-generate-music').disabled = true;
+
+        try {
+            const { task_id, music_id } = await API.generateMusic(prompt, duration);
+
+            API.streamMusicGen(task_id, async (data) => {
+                UI.showProgress('musicgen', data);
+
+                if (data.status === 'completed') {
+                    UI.$('btn-generate-music').disabled = false;
+                    await this.loadMusic();
+                    // Auto-select the generated track
+                    const generated = this.state.musicList.find(m => m.id === music_id);
+                    if (generated) this.selectMusic(generated);
+                } else if (data.status === 'failed') {
+                    UI.$('btn-generate-music').disabled = false;
+                    alert('Music generation failed: ' + data.message);
+                }
+            });
+        } catch (e) {
+            UI.$('btn-generate-music').disabled = false;
+            alert('Music generation failed: ' + e.message);
+        }
     },
 
     async removeMusic(id) {

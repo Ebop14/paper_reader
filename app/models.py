@@ -25,6 +25,11 @@ class TTSRequest(BaseModel):
     speed: float = 1.0
 
 
+class MusicGenerateRequest(BaseModel):
+    prompt: str
+    duration: int = 30
+
+
 class MixExportRequest(BaseModel):
     paper_id: str
     music_id: str | None = None

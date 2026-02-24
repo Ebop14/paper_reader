@@ -1,0 +1,409 @@
+:root {
+    --bg: #0f0f0f;
+    --surface: #1a1a1a;
+    --surface-2: #242424;
+    --border: #333;
+    --text: #e0e0e0;
+    --text-dim: #888;
+    --accent: #7c6fe0;
+    --accent-hover: #6b5dd3;
+    --accent-dim: rgba(124, 111, 224, 0.15);
+    --success: #4caf50;
+    --error: #ef5350;
+    --radius: 8px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+}
+
+header {
+    padding: 1.5rem 2rem 1rem;
+    border-bottom: 1px solid var(--border);
+}
+
+header h1 {
+    font-size: 1.4rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+}
+
+.subtitle {
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    margin-top: 0.25rem;
+}
+
+main {
+    display: grid;
+    grid-template-columns: 260px 1fr 300px;
+    gap: 1px;
+    background: var(--border);
+    min-height: calc(100vh - 80px);
+}
+
+.panel {
+    background: var(--bg);
+    padding: 1.25rem;
+    overflow-y: auto;
+}
+
+.panel h2 {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin-bottom: 1rem;
+}
+
+.panel h3 {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin-bottom: 0.75rem;
+    margin-top: 1.5rem;
+}
+
+/* Buttons */
+.btn {
+    border: none;
+    border-radius: var(--radius);
+    padding: 0.5rem 1rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.15s;
+    font-family: inherit;
+}
+
+.btn-primary {
+    background: var(--accent);
+    color: #fff;
+}
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.btn-secondary {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+}
+.btn-secondary:hover { background: var(--border); }
+
+.btn-icon {
+    background: var(--surface-2);
+    color: var(--text);
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    padding: 0;
+}
+.btn-icon:hover { background: var(--border); }
+.btn-play { width: 44px; height: 44px; font-size: 1rem; }
+
+/* Upload */
+.upload-zone {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.upload-zone.drag-over {
+    outline: 2px dashed var(--accent);
+    outline-offset: -2px;
+    border-radius: var(--radius);
+    padding: 0.5rem;
+}
+
+.upload-hint {
+    color: var(--text-dim);
+    font-size: 0.8rem;
+}
+
+/* Paper list */
+.paper-list {
+    list-style: none;
+}
+
+.paper-list li {
+    padding: 0.6rem 0.75rem;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: 0.85rem;
+    margin-bottom: 2px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    transition: background 0.1s;
+}
+
+.paper-list li:hover { background: var(--surface); }
+.paper-list li.active { background: var(--accent-dim); }
+
+.paper-list .paper-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.paper-list .paper-meta {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+}
+
+/* Text content */
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+}
+
+.panel-header h2 {
+    margin-bottom: 0;
+}
+
+.process-controls {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.process-controls select {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.4rem 0.6rem;
+    font-size: 0.82rem;
+    font-family: inherit;
+}
+
+.text-content {
+    font-size: 0.9rem;
+    line-height: 1.7;
+    max-height: calc(100vh - 220px);
+    overflow-y: auto;
+}
+
+.text-content .placeholder {
+    color: var(--text-dim);
+    text-align: center;
+    padding: 3rem 1rem;
+}
+
+.text-content .section {
+    margin-bottom: 1.5rem;
+}
+
+.text-content .section-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    margin-bottom: 0.4rem;
+}
+
+.text-content .section-body {
+    color: var(--text);
+}
+
+.text-content .section.active-chunk {
+    background: var(--accent-dim);
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--radius);
+}
+
+/* Progress */
+.progress-bar {
+    height: 24px;
+    background: var(--surface-2);
+    border-radius: var(--radius);
+    overflow: hidden;
+    position: relative;
+    margin-bottom: 1rem;
+}
+
+.progress-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.3s;
+    width: 0%;
+}
+
+.progress-label {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 0.75rem;
+    color: #fff;
+    white-space: nowrap;
+}
+
+/* Player */
+.player-controls {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.chunk-indicator {
+    text-align: center;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-bottom: 1rem;
+}
+
+.volume-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.volume-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.volume-row label {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    min-width: 50px;
+}
+
+.volume-row input[type="range"] {
+    flex: 1;
+}
+
+/* TTS Controls */
+.tts-controls {
+    margin-bottom: 1rem;
+}
+
+.control-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.6rem;
+}
+
+.control-row label {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    min-width: 40px;
+}
+
+.control-row select {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.35rem 0.5rem;
+    font-size: 0.82rem;
+    font-family: inherit;
+}
+
+.control-row input[type="range"] {
+    flex: 1;
+}
+
+.control-row span {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    min-width: 30px;
+}
+
+/* Music list */
+.music-list {
+    list-style: none;
+    margin-top: 0.5rem;
+}
+
+.music-list li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.4rem 0.5rem;
+    border-radius: var(--radius);
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: background 0.1s;
+}
+
+.music-list li:hover { background: var(--surface); }
+.music-list li.active { background: var(--accent-dim); }
+
+.music-list .music-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.music-list .music-remove {
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 0.75rem;
+    padding: 0.2rem;
+}
+.music-list .music-remove:hover { color: var(--error); }
+
+/* Export */
+.export-section {
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+}
+
+/* Range inputs */
+input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    background: var(--surface-2);
+    border-radius: 2px;
+    outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* Status badges */
+.badge {
+    display: inline-block;
+    font-size: 0.65rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.badge-processed { background: rgba(76, 175, 80, 0.2); color: var(--success); }
+.badge-audio { background: rgba(124, 111, 224, 0.2); color: var(--accent); }

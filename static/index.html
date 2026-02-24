@@ -9,7 +9,7 @@
 <body>
     <header>
         <h1>Paper Reader</h1>
-        <p class="subtitle">Upload papers, listen with lo-fi vibes</p>
+        <p class="subtitle">Upload papers, generate video scripts & voiceover</p>
     </header>
 
     <main>
@@ -26,66 +26,76 @@
             <ul id="paper-list" class="paper-list"></ul>
         </section>
 
-        <!-- Center Panel: Text View + Processing -->
+        <!-- Center Panel: Pipeline + Script -->
         <section class="panel" id="panel-text">
             <div class="panel-header">
                 <h2 id="text-title">Select a paper</h2>
-                <div class="process-controls" id="process-controls" style="display:none">
-                    <select id="process-mode">
-                        <option value="verbatim">Verbatim cleanup</option>
-                        <option value="narrated">Podcast narration</option>
-                    </select>
-                    <button class="btn btn-secondary" id="btn-process">Process with Claude</button>
+                <div class="pipeline-controls" id="pipeline-controls" style="display:none">
+                    <div class="control-row">
+                        <label for="voice-select">Voice</label>
+                        <select id="voice-select">
+                            <option value="serena">Serena</option>
+                            <option value="vivian">Vivian</option>
+                            <option value="ryan">Ryan</option>
+                            <option value="aiden">Aiden</option>
+                            <option value="eric">Eric</option>
+                            <option value="dylan">Dylan</option>
+                            <option value="sohee">Sohee</option>
+                            <option value="ono_anna">Ono Anna</option>
+                            <option value="uncle_fu">Uncle Fu</option>
+                        </select>
+                    </div>
+                    <div class="control-row">
+                        <label for="tts-speed">Speed</label>
+                        <input type="range" id="tts-speed" min="0.5" max="2.0" step="0.1" value="1.0">
+                        <span id="tts-speed-val">1.0x</span>
+                    </div>
+                    <button class="btn btn-primary" id="btn-generate">Generate Video</button>
                 </div>
             </div>
-            <div class="progress-bar" id="llm-progress" style="display:none">
-                <div class="progress-fill" id="llm-progress-fill"></div>
-                <span class="progress-label" id="llm-progress-label"></span>
+
+            <!-- Pipeline Stage Indicator -->
+            <div class="pipeline-stages" id="pipeline-stages" style="display:none">
+                <div class="stage" data-stage="loading">
+                    <div class="stage-dot"></div>
+                    <span>Loading</span>
+                </div>
+                <div class="stage-connector"></div>
+                <div class="stage" data-stage="scripting">
+                    <div class="stage-dot"></div>
+                    <span>Scripting</span>
+                </div>
+                <div class="stage-connector"></div>
+                <div class="stage" data-stage="voiceover">
+                    <div class="stage-dot"></div>
+                    <span>Voiceover</span>
+                </div>
+                <div class="stage-connector"></div>
+                <div class="stage" data-stage="done">
+                    <div class="stage-dot"></div>
+                    <span>Done</span>
+                </div>
             </div>
+
+            <div class="progress-bar" id="pipeline-progress" style="display:none">
+                <div class="progress-fill" id="pipeline-progress-fill"></div>
+                <span class="progress-label" id="pipeline-progress-label"></span>
+            </div>
+
             <div id="text-content" class="text-content">
                 <p class="placeholder">Upload a PDF to get started</p>
             </div>
         </section>
 
-        <!-- Right Panel: Audio Player -->
+        <!-- Right Panel: Player -->
         <section class="panel" id="panel-audio">
             <h2>Player</h2>
 
-            <!-- TTS Controls -->
-            <div class="tts-controls" id="tts-controls" style="display:none">
-                <div class="control-row">
-                    <label for="voice-select">Voice</label>
-                    <select id="voice-select">
-                        <option value="serena">Serena</option>
-                        <option value="vivian">Vivian</option>
-                        <option value="ryan">Ryan</option>
-                        <option value="aiden">Aiden</option>
-                        <option value="eric">Eric</option>
-                        <option value="dylan">Dylan</option>
-                        <option value="sohee">Sohee</option>
-                        <option value="ono_anna">Ono Anna</option>
-                        <option value="uncle_fu">Uncle Fu</option>
-                    </select>
-                </div>
-                <div class="control-row">
-                    <label for="tts-speed">Speed</label>
-                    <input type="range" id="tts-speed" min="0.5" max="2.0" step="0.1" value="1.0">
-                    <span id="tts-speed-val">1.0x</span>
-                </div>
-                <button class="btn btn-primary" id="btn-generate-tts">Generate Audio</button>
-            </div>
-
-            <div class="progress-bar" id="tts-progress" style="display:none">
-                <div class="progress-fill" id="tts-progress-fill"></div>
-                <span class="progress-label" id="tts-progress-label"></span>
-            </div>
-
-            <!-- Audio Player -->
             <div id="player" style="display:none">
                 <div class="player-controls">
-                    <button class="btn btn-icon" id="btn-prev" title="Previous chunk">&#9664;&#9664;</button>
+                    <button class="btn btn-icon" id="btn-prev" title="Previous segment">&#9664;&#9664;</button>
                     <button class="btn btn-icon btn-play" id="btn-play" title="Play">&#9654;</button>
-                    <button class="btn btn-icon" id="btn-next" title="Next chunk">&#9654;&#9654;</button>
+                    <button class="btn btn-icon" id="btn-next" title="Next segment">&#9654;&#9654;</button>
                 </div>
                 <div class="chunk-indicator">
                     <span id="chunk-current">0</span> / <span id="chunk-total">0</span>
@@ -93,39 +103,15 @@
 
                 <div class="volume-controls">
                     <div class="volume-row">
-                        <label>Speech</label>
+                        <label>Volume</label>
                         <input type="range" id="vol-speech" min="0" max="1" step="0.05" value="1">
                     </div>
-                    <div class="volume-row">
-                        <label>Music</label>
-                        <input type="range" id="vol-music" min="0" max="1" step="0.05" value="0.3">
-                    </div>
                 </div>
-            </div>
-
-            <!-- Music Upload & Generate -->
-            <div class="music-section">
-                <h3>Background Music</h3>
-                <input type="file" id="music-input" accept=".mp3,.wav,.ogg,.m4a,.flac" hidden>
-                <button class="btn btn-secondary" onclick="document.getElementById('music-input').click()">
-                    Upload Music
-                </button>
-                <div class="musicgen-controls">
-                    <input type="text" id="musicgen-prompt" class="text-input"
-                           value="lo-fi hip hop beats, relaxing, soft piano, ambient study music"
-                           placeholder="Describe the vibe...">
-                    <button class="btn btn-secondary" id="btn-generate-music">Generate Music</button>
-                </div>
-                <div class="progress-bar" id="musicgen-progress" style="display:none">
-                    <div class="progress-fill" id="musicgen-progress-fill"></div>
-                    <span class="progress-label" id="musicgen-progress-label"></span>
-                </div>
-                <ul id="music-list" class="music-list"></ul>
             </div>
 
             <!-- Export -->
             <div class="export-section" id="export-section" style="display:none">
-                <button class="btn btn-secondary" id="btn-export">Download Mixed MP3</button>
+                <button class="btn btn-secondary" id="btn-export">Download Voiceover</button>
             </div>
         </section>
     </main>

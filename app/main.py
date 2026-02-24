@@ -5,7 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
 
-from app.routers import papers, tts, music, mix
+from app.routers import papers, tts, pipeline
 
 
 @asynccontextmanager
@@ -21,8 +21,7 @@ app = FastAPI(title="Paper Reader", lifespan=lifespan)
 
 app.include_router(papers.router)
 app.include_router(tts.router)
-app.include_router(music.router)
-app.include_router(mix.router)
+app.include_router(pipeline.router)
 
 static_dir = Path(__file__).resolve().parent.parent / "static"
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")

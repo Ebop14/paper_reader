@@ -10,6 +10,7 @@
     --accent-dim: rgba(124, 111, 224, 0.15);
     --success: #4caf50;
     --error: #ef5350;
+    --warning: #ff9800;
     --radius: 8px;
 }
 
@@ -176,13 +177,15 @@ main {
     margin-bottom: 0;
 }
 
-.process-controls {
+/* Pipeline controls */
+.pipeline-controls {
     display: flex;
     gap: 0.5rem;
     align-items: center;
+    flex-wrap: wrap;
 }
 
-.process-controls select {
+.pipeline-controls select {
     background: var(--surface-2);
     color: var(--text);
     border: 1px solid var(--border);
@@ -195,7 +198,7 @@ main {
 .text-content {
     font-size: 0.9rem;
     line-height: 1.7;
-    max-height: calc(100vh - 220px);
+    max-height: calc(100vh - 320px);
     overflow-y: auto;
 }
 
@@ -254,6 +257,175 @@ main {
     white-space: nowrap;
 }
 
+/* Pipeline Stage Indicator */
+.pipeline-stages {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin-bottom: 1rem;
+    padding: 0.75rem 0;
+}
+
+.stage {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.3rem 0.6rem;
+    border-radius: var(--radius);
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    transition: all 0.3s;
+}
+
+.stage .stage-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--border);
+    transition: all 0.3s;
+}
+
+.stage.active {
+    color: var(--accent);
+    background: var(--accent-dim);
+}
+
+.stage.active .stage-dot {
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent);
+}
+
+.stage.completed {
+    color: var(--success);
+}
+
+.stage.completed .stage-dot {
+    background: var(--success);
+}
+
+.stage.failed {
+    color: var(--error);
+}
+
+.stage.failed .stage-dot {
+    background: var(--error);
+}
+
+.stage-connector {
+    width: 24px;
+    height: 2px;
+    background: var(--border);
+    transition: background 0.3s;
+}
+
+.stage-connector.completed {
+    background: var(--success);
+}
+
+/* Script Segment Cards */
+.segment-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.75rem;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.segment-card:hover {
+    border-color: var(--accent);
+}
+
+.segment-card.active-chunk {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+}
+
+.segment-card .segment-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.4rem;
+}
+
+.segment-card .segment-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+}
+
+.segment-card .segment-duration {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+}
+
+.segment-card .segment-narration {
+    font-size: 0.85rem;
+    line-height: 1.6;
+    color: var(--text);
+}
+
+.segment-card .segment-hints {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-top: 0.5rem;
+}
+
+/* Animation Hint Badges */
+.hint-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    font-size: 0.6rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: var(--surface-2);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+}
+
+.hint-badge[data-type="equation"] {
+    background: rgba(255, 152, 0, 0.15);
+    color: var(--warning);
+    border-color: rgba(255, 152, 0, 0.3);
+}
+
+.hint-badge[data-type="diagram"] {
+    background: rgba(33, 150, 243, 0.15);
+    color: #64b5f6;
+    border-color: rgba(33, 150, 243, 0.3);
+}
+
+.hint-badge[data-type="bullet_list"] {
+    background: rgba(76, 175, 80, 0.15);
+    color: var(--success);
+    border-color: rgba(76, 175, 80, 0.3);
+}
+
+.hint-badge[data-type="highlight"] {
+    background: rgba(124, 111, 224, 0.15);
+    color: var(--accent);
+    border-color: rgba(124, 111, 224, 0.3);
+}
+
+.hint-badge[data-type="code"] {
+    background: rgba(233, 30, 99, 0.15);
+    color: #f48fb1;
+    border-color: rgba(233, 30, 99, 0.3);
+}
+
+.hint-badge[data-type="graph"] {
+    background: rgba(0, 188, 212, 0.15);
+    color: #4dd0e1;
+    border-color: rgba(0, 188, 212, 0.3);
+}
+
 /* Player */
 .player-controls {
     display: flex;
@@ -292,11 +464,7 @@ main {
     flex: 1;
 }
 
-/* TTS Controls */
-.tts-controls {
-    margin-bottom: 1rem;
-}
-
+/* Controls */
 .control-row {
     display: flex;
     align-items: center;
@@ -329,70 +497,6 @@ main {
     color: var(--text-dim);
     min-width: 30px;
 }
-
-/* MusicGen controls */
-.musicgen-controls {
-    margin-top: 0.75rem;
-}
-
-.musicgen-controls .text-input {
-    width: 100%;
-    background: var(--surface-2);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 0.5rem 0.6rem;
-    font-size: 0.82rem;
-    font-family: inherit;
-    margin-bottom: 0.5rem;
-}
-
-.musicgen-controls .text-input::placeholder {
-    color: var(--text-dim);
-}
-
-.musicgen-controls .text-input:focus {
-    outline: none;
-    border-color: var(--accent);
-}
-
-.musicgen-controls .btn {
-    margin-top: 0.4rem;
-}
-
-/* Music list */
-.music-list {
-    list-style: none;
-    margin-top: 0.5rem;
-}
-
-.music-list li {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.4rem 0.5rem;
-    border-radius: var(--radius);
-    font-size: 0.82rem;
-    cursor: pointer;
-    transition: background 0.1s;
-}
-
-.music-list li:hover { background: var(--surface); }
-.music-list li.active { background: var(--accent-dim); }
-
-.music-list .music-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.music-list .music-remove {
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 0.75rem;
-    padding: 0.2rem;
-}
-.music-list .music-remove:hover { color: var(--error); }
 
 /* Export */
 .export-section {
@@ -438,3 +542,4 @@ input[type="range"]::-webkit-slider-thumb {
 
 .badge-processed { background: rgba(76, 175, 80, 0.2); color: var(--success); }
 .badge-audio { background: rgba(124, 111, 224, 0.2); color: var(--accent); }
+.badge-script { background: rgba(255, 152, 0, 0.2); color: var(--warning); }

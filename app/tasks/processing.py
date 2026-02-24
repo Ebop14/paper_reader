@@ -7,7 +7,7 @@ from typing import AsyncGenerator
 task_registry: dict[str, dict] = {}
 
 
-def create_task(task_id: str, total_chunks: int = 0):
+def create_task(task_id: str, total_chunks: int = 0, stages: list[str] | None = None):
     task_registry[task_id] = {
         "task_id": task_id,
         "status": "running",
@@ -17,6 +17,10 @@ def create_task(task_id: str, total_chunks: int = 0):
         "message": "Starting...",
         "updated_at": time.time(),
     }
+    if stages:
+        task_registry[task_id]["stages"] = stages
+        task_registry[task_id]["stage"] = stages[0]
+        task_registry[task_id]["stage_progress"] = 0.0
 
 
 def update_task(task_id: str, **kwargs):

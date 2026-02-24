@@ -25,3 +25,7 @@ def music_dir() -> Path:
 
 def exports_dir() -> Path:
     return _ensure(settings.data_dir / "exports")
+
+
+def scripts_dir() -> Path:
+    return _ensure(settings.data_dir / "scripts")

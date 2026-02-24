@@ -2,13 +2,10 @@ const App = {
     state: {
         papers: [],
         activePaper: null,
-        displayedSections: null,
-        processedMode: null,
+        script: null,
         chunks: [],
         currentChunk: 0,
         playing: false,
-        musicList: [],
-        activeMusic: null,
     },
 
     mixer: new AudioMixer(),
@@ -16,7 +13,6 @@ const App = {
     async init() {
         this.bindEvents();
         await this.loadPapers();
-        await this.loadMusic();
     },
 
     bindEvents() {
@@ -34,14 +30,13 @@ const App = {
             if (file && file.name.endsWith('.pdf')) this.uploadPaper(file);
         };
 
-        // Processing
-        UI.$('btn-process').onclick = () => this.processActivePaper();
+        // Pipeline
+        UI.$('btn-generate').onclick = () => this.runPipeline();
 
-        // TTS
+        // Speed display
         UI.$('tts-speed').oninput = (e) => {
             UI.$('tts-speed-val').textContent = `${e.target.value}x`;
         };
-        UI.$('btn-generate-tts').onclick = () => this.generateTTS();
 
         // Player controls
         UI.$('btn-play').onclick = () => this.togglePlay();
@@ -50,18 +45,9 @@ const App = {
 
         // Volume
         UI.$('vol-speech').oninput = (e) => this.mixer.setSpeechVolume(parseFloat(e.target.value));
-        UI.$('vol-music').oninput = (e) => this.mixer.setMusicVolume(parseFloat(e.target.value));
-
-        // Music upload
-        UI.$('music-input').onchange = (e) => {
-            if (e.target.files[0]) this.uploadMusic(e.target.files[0]);
-        };
-
-        // Music generation
-        UI.$('btn-generate-music').onclick = () => this.generateMusic();
 
         // Export
-        UI.$('btn-export').onclick = () => this.exportMix();
+        UI.$('btn-export').onclick = () => this.exportVoiceover();
 
         // Speech ended -> next chunk
         this.mixer.onSpeechEnded(() => this.nextChunk());
@@ -86,93 +72,80 @@ const App = {
 
     async selectPaper(paper) {
         this.state.activePaper = paper;
-        this.state.displayedSections = paper.sections;
-        this.state.processedMode = null;
+        this.state.script = null;
+        this.state.chunks = [];
+        this.state.currentChunk = 0;
+        this.state.playing = false;
 
         UI.renderPaperList(this.state.papers, paper.id, (p) => this.selectPaper(p));
         UI.$('text-title').textContent = paper.filename;
-        UI.$('process-controls').style.display = 'flex';
-        UI.$('tts-controls').style.display = 'block';
+        UI.$('pipeline-controls').style.display = 'flex';
+        UI.$('pipeline-stages').style.display = 'none';
+
+        // Show raw sections initially
         UI.renderSections(paper.sections, -1);
 
-        // Check for existing processed text
-        for (const mode of ['narrated', 'verbatim']) {
-            const processed = await API.getProcessed(paper.id, mode);
-            if (processed) {
-                this.state.displayedSections = processed;
-                this.state.processedMode = mode;
-                UI.renderSections(processed, -1);
-                break;
-            }
+        // Check for existing script
+        const script = await API.getScript(paper.id);
+        if (script) {
+            this.state.script = script;
+            UI.renderScript(script, -1);
+            UI.renderPipelineStages('done', 'completed');
         }
 
-        // Check for existing audio chunks
-        const chunks = await API.listChunks(paper.id);
+        // Check for existing audio
+        const chunks = await API.listPipelineAudio(paper.id);
         if (chunks.length > 0) {
             this.state.chunks = chunks;
             this.state.currentChunk = 0;
             UI.setPlayerVisible(true);
             UI.updateChunkIndicator(1, chunks.length);
         } else {
-            this.state.chunks = [];
             UI.setPlayerVisible(false);
         }
     },
 
-    // --- Processing ---
-    async processActivePaper() {
-        const paper = this.state.activePaper;
-        if (!paper) return;
-
-        const mode = UI.$('process-mode').value;
-        UI.$('btn-process').disabled = true;
-
-        await API.startProcessing(paper.id, mode);
-
-        API.streamProcessing(paper.id, mode, async (data) => {
-            UI.showProgress('llm', data);
-
-            if (data.status === 'completed') {
-                UI.$('btn-process').disabled = false;
-                const processed = await API.getProcessed(paper.id, mode);
-                if (processed) {
-                    this.state.displayedSections = processed;
-                    this.state.processedMode = mode;
-                    UI.renderSections(processed, -1);
-                }
-            } else if (data.status === 'failed') {
-                UI.$('btn-process').disabled = false;
-                alert('Processing failed: ' + data.message);
-            }
-        });
-    },
-
-    // --- TTS ---
-    async generateTTS() {
+    // --- Pipeline ---
+    async runPipeline() {
         const paper = this.state.activePaper;
         if (!paper) return;
 
         const voice = UI.$('voice-select').value;
         const speed = parseFloat(UI.$('tts-speed').value);
 
-        UI.$('btn-generate-tts').disabled = true;
+        UI.$('btn-generate').disabled = true;
 
-        await API.startTTS(paper.id, voice, speed);
+        await API.startPipeline(paper.id, voice, speed);
 
-        API.streamTTS(paper.id, (data) => {
-            UI.showProgress('tts', data);
+        API.streamPipeline(paper.id, async (data) => {
+            UI.showPipelineProgress(data);
 
-            // Progressive: show player as soon as first chunk is ready
-            if (data.current_chunk >= 1 && this.state.chunks.length === 0) {
+            // When scripting completes, load script preview
+            if (data.stage === 'voiceover' && !this.state.script) {
+                const script = await API.getScript(paper.id);
+                if (script) {
+                    this.state.script = script;
+                    UI.renderScript(script, -1);
+                }
+            }
+
+            // Progressive audio: show player as voiceover chunks arrive
+            if (data.stage === 'voiceover' && data.current_chunk >= 1) {
                 this.refreshChunks();
             }
 
             if (data.status === 'completed') {
-                UI.$('btn-generate-tts').disabled = false;
+                UI.$('btn-generate').disabled = false;
+                // Reload final script with actual durations
+                const script = await API.getScript(paper.id);
+                if (script) {
+                    this.state.script = script;
+                    UI.renderScript(script, -1);
+                }
                 this.refreshChunks();
             } else if (data.status === 'failed') {
-                UI.$('btn-generate-tts').disabled = false;
-                alert('TTS failed: ' + data.message);
+                UI.$('btn-generate').disabled = false;
+                alert('Pipeline failed: ' + data.message);
             }
         });
     },
@@ -180,7 +153,7 @@ const App = {
     async refreshChunks() {
         const paper = this.state.activePaper;
         if (!paper) return;
-        const chunks = await API.listChunks(paper.id);
+        const chunks = await API.listPipelineAudio(paper.id);
         this.state.chunks = chunks;
         if (chunks.length > 0) {
             UI.setPlayerVisible(true);
@@ -194,7 +167,6 @@ const App = {
 
         if (this.mixer.isPlaying) {
             this.mixer.pauseSpeech();
-            this.mixer.pauseMusic();
             this.state.playing = false;
         } else {
             if (this.mixer.speechEl.src && !this.mixer.speechEl.ended) {
@@ -202,7 +174,6 @@ const App = {
             } else {
                 await this.playChunk(this.state.currentChunk);
             }
-            this.mixer.playMusic();
             this.state.playing = true;
         }
         UI.updatePlayButton(this.state.playing);
@@ -212,13 +183,12 @@ const App = {
         if (index < 0 || index >= this.state.chunks.length) {
             this.state.playing = false;
             UI.updatePlayButton(false);
-            this.mixer.pauseMusic();
             return;
         }
 
         this.state.currentChunk = index;
         const chunk = this.state.chunks[index];
-        const url = API.chunkURL(this.state.activePaper.id, chunk.filename);
+        const url = API.pipelineAudioURL(this.state.activePaper.id, chunk.filename);
         await this.mixer.playSpeech(url);
 
         UI.updateChunkIndicator(index + 1, this.state.chunks.length);
@@ -249,83 +219,8 @@ const App = {
         }
     },
 
-    // --- Music ---
-    async loadMusic() {
-        this.state.musicList = await API.listMusic();
-        UI.renderMusicList(
-            this.state.musicList, this.state.activeMusic?.id,
-            (m) => this.selectMusic(m), (id) => this.removeMusic(id),
-        );
-    },
-
-    async uploadMusic(file) {
-        try {
-            const meta = await API.uploadMusic(file);
-            this.state.musicList.push(meta);
-            UI.renderMusicList(
-                this.state.musicList, this.state.activeMusic?.id,
-                (m) => this.selectMusic(m), (id) => this.removeMusic(id),
-            );
-            this.selectMusic(meta);
-        } catch (e) {
-            alert('Music upload failed: ' + e.message);
-        }
-    },
-
-    selectMusic(music) {
-        this.state.activeMusic = music;
-        this.mixer.setMusic(API.musicURL(music.id));
-        UI.renderMusicList(
-            this.state.musicList, music.id,
-            (m) => this.selectMusic(m), (id) => this.removeMusic(id),
-        );
-    },
-
-    async generateMusic() {
-        const prompt = UI.$('musicgen-prompt').value.trim()
-            || 'lo-fi hip hop beats, relaxing, soft piano, ambient study music';
-        const duration = 30;
-
-        UI.$('btn-generate-music').disabled = true;
-
-        try {
-            const { task_id, music_id } = await API.generateMusic(prompt, duration);
-
-            API.streamMusicGen(task_id, async (data) => {
-                UI.showProgress('musicgen', data);
-
-                if (data.status === 'completed') {
-                    UI.$('btn-generate-music').disabled = false;
-                    await this.loadMusic();
-                    // Auto-select the generated track
-                    const generated = this.state.musicList.find(m => m.id === music_id);
-                    if (generated) this.selectMusic(generated);
-                } else if (data.status === 'failed') {
-                    UI.$('btn-generate-music').disabled = false;
-                    alert('Music generation failed: ' + data.message);
-                }
-            });
-        } catch (e) {
-            UI.$('btn-generate-music').disabled = false;
-            alert('Music generation failed: ' + e.message);
-        }
-    },
-
-    async removeMusic(id) {
-        await API.deleteMusic(id);
-        this.state.musicList = this.state.musicList.filter(m => m.id !== id);
-        if (this.state.activeMusic?.id === id) {
-            this.state.activeMusic = null;
-            this.mixer.musicEl.src = '';
-        }
-        UI.renderMusicList(
-            this.state.musicList, this.state.activeMusic?.id,
-            (m) => this.selectMusic(m), (id) => this.removeMusic(id),
-        );
-    },
-
     // --- Export ---
-    async exportMix() {
+    async exportVoiceover() {
         const paper = this.state.activePaper;
         if (!paper) return;
 
@@ -333,16 +228,11 @@ const App = {
         UI.$('btn-export').textContent = 'Exporting...';
 
         try {
-            const speechVol = parseFloat(UI.$('vol-speech').value);
-            const musicVol = parseFloat(UI.$('vol-music').value);
-            const blob = await API.exportMix(
-                paper.id, this.state.activeMusic?.id, speechVol, musicVol,
-            );
-
+            const blob = await API.exportVoiceover(paper.id);
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `${paper.filename.replace('.pdf', '')}_mixed.mp3`;
+            a.download = `${paper.filename.replace('.pdf', '')}_voiceover.mp3`;
             a.click();
             URL.revokeObjectURL(url);
         } catch (e) {
@@ -350,7 +240,7 @@ const App = {
         }
 
         UI.$('btn-export').disabled = false;
-        UI.$('btn-export').textContent = 'Download Mixed MP3';
+        UI.$('btn-export').textContent = 'Download Voiceover';
     },
 };
 

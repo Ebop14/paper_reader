@@ -17,24 +17,37 @@ const API = {
         return res.json();
     },
 
-    async startProcessing(paperId, mode) {
-        const res = await fetch(`/api/papers/${paperId}/process`, {
+    // --- Pipeline ---
+
+    async startPipeline(paperId, voice, speed) {
+        const res = await fetch(`/api/pipeline/${paperId}/start`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode }),
+            body: JSON.stringify({ voice, speed }),
         });
         return res.json();
     },
 
-    streamProcessing(paperId, mode, onEvent) {
-        return this._sse(`/api/papers/${paperId}/process/stream?mode=${mode}`, onEvent);
+    streamPipeline(paperId, onEvent) {
+        return this._sse(`/api/pipeline/${paperId}/stream`, onEvent);
     },
 
-    async getProcessed(paperId, mode) {
-        const res = await fetch(`/api/papers/${paperId}/processed/${mode}`);
+    async getScript(paperId) {
+        const res = await fetch(`/api/pipeline/${paperId}/script`);
         if (!res.ok) return null;
         return res.json();
     },
+
+    async listPipelineAudio(paperId) {
+        const res = await fetch(`/api/pipeline/${paperId}/audio`);
+        return res.json();
+    },
+
+    pipelineAudioURL(paperId, filename) {
+        return `/api/pipeline/${paperId}/audio/${filename}`;
+    },
+
+    // --- Legacy TTS (backward compat) ---
 
     async startTTS(paperId, voice, speed) {
         const res = await fetch('/api/tts/generate', {
@@ -58,51 +71,11 @@ const API = {
         return `/api/tts/${paperId}/${filename}`;
     },
 
-    async uploadMusic(file) {
-        const form = new FormData();
-        form.append('file', file);
-        const res = await fetch('/api/music/upload', { method: 'POST', body: form });
-        if (!res.ok) throw new Error(await res.text());
-        return res.json();
-    },
+    // --- Export ---
 
-    async listMusic() {
-        const res = await fetch('/api/music');
-        return res.json();
-    },
-
-    musicURL(musicId) {
-        return `/api/music/${musicId}`;
-    },
-
-    async deleteMusic(musicId) {
-        await fetch(`/api/music/${musicId}`, { method: 'DELETE' });
-    },
-
-    async generateMusic(prompt, duration) {
-        const res = await fetch('/api/music/generate', {
+    async exportVoiceover(paperId) {
+        const res = await fetch(`/api/pipeline/${paperId}/export`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt, duration }),
-        });
-        if (!res.ok) throw new Error(await res.text());
-        return res.json();
-    },
-
-    streamMusicGen(taskId, onEvent) {
-        return this._sse(`/api/music/generate/stream?task_id=${taskId}`, onEvent);
-    },
-
-    async exportMix(paperId, musicId, speechVol, musicVol) {
-        const res = await fetch('/api/mix/export', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                paper_id: paperId,
-                music_id: musicId,
-                speech_volume: speechVol,
-                music_volume: musicVol,
-            }),
         });
         if (!res.ok) throw new Error(await res.text());
         return res.blob();

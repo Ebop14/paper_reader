@@ -35,6 +35,7 @@ const App = {
         // Pipeline
         UI.$('btn-generate').onclick = () => this.runPipeline();
         UI.$('btn-render').onclick = () => this.runRender();
+        UI.$('btn-reannotate').onclick = () => this.runReannotate();
 
         // Speed display
         UI.$('tts-speed').oninput = (e) => {
@@ -128,8 +129,10 @@ const App = {
             UI.renderScript(script, -1);
             UI.renderPipelineStages('done', 'completed');
             UI.$('btn-render').style.display = '';
+            UI.$('btn-reannotate').style.display = '';
         } else {
             UI.$('btn-render').style.display = 'none';
+            UI.$('btn-reannotate').style.display = 'none';
         }
 
         // Check for existing audio
@@ -186,6 +189,7 @@ const App = {
             if (data.status === 'completed') {
                 UI.$('btn-generate').disabled = false;
                 UI.$('btn-render').style.display = '';
+                UI.$('btn-reannotate').style.display = '';
                 // Reload final script with actual durations
                 const script = await API.getScript(paper.id);
                 if (script) {
@@ -233,6 +237,41 @@ const App = {
                 UI.$('btn-render').disabled = false;
                 UI.$('btn-generate').disabled = false;
                 alert('Render failed: ' + data.message);
+            }
+        });
+    },
+
+    async runReannotate() {
+        const paper = this.state.activePaper;
+        if (!paper) return;
+
+        UI.$('btn-reannotate').disabled = true;
+        UI.$('btn-render').disabled = true;
+        UI.$('btn-generate').disabled = true;
+
+        await API.startReannotate(paper.id);
+
+        API.streamReannotate(paper.id, async (data) => {
+            UI.showPipelineProgress(data);
+
+            if (data.status === 'completed') {
+                UI.$('btn-reannotate').disabled = false;
+                UI.$('btn-render').disabled = false;
+                UI.$('btn-generate').disabled = false;
+                const script = await API.getScript(paper.id);
+                if (script) {
+                    this.state.script = script;
+                    UI.renderScript(script, -1);
+                    if (script.video_file) {
+                        UI.showVideoPlayer(API.videoURL(paper.id));
+                    }
+                }
+                await this.loadAnimations();
+            } else if (data.status === 'failed') {
+                UI.$('btn-reannotate').disabled = false;
+                UI.$('btn-render').disabled = false;
+                UI.$('btn-generate').disabled = false;
+                alert('Re-annotation failed: ' + data.message);
             }
         });
     },

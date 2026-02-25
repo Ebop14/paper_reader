@@ -40,17 +40,14 @@ class SegmentScene(Scene):
 - Your total animation run_time + wait time should approximately fill DURATION seconds.
 - Always clear objects before introducing new ones — don't let the screen get cluttered.
 - End the scene by fading out any remaining objects.
-- Wrap ALL MathTex/Tex in try/except with a Text fallback — LaTeX compilation can fail:
-    ```
-        try:
-            eq = MathTex(r"E = mc^2")
-        except Exception:
-            eq = Text("E = mc²", font_size=28)
-    ```
+- **NEVER use MathTex or Tex** — the LaTeX environment is unreliable. Use Text() for ALL text, including equations. For math, use Unicode characters: Text("E = mc²"), Text("O(n²)"), Text("∑"), Text("∈"), Text("≤"), etc.
 - Keep all text short. The narration carries the detail — visuals should be diagrams, equations, charts, and structural layouts.
 - Do NOT use external files, images, SVGs, or network resources.
 - Do NOT use `self.camera` or `self.renderer` — just standard Scene methods.
 - Do NOT define new classes or functions — write straight-line construct() code.
+- **NEVER use GrowArrow() on CurvedArrow or CurvedDoubleArrow** — it causes an infinite hang. Use Create() instead. GrowArrow ONLY works on Arrow and DoubleArrow.
+- **Sector uses `radius`, NOT `outer_radius`**: `Sector(radius=2, angle=PI/4)`. Passing `outer_radius=` causes a TypeError.
+- **ONLY use colors from the whitelist below.** ORANGE has NO variants — no ORANGE_A/B/C/D/E. PURPLE has NO variants. PINK has NO variants. If you need a shade, pick from a color family that has variants (RED_A-E, BLUE_A-E, GREEN_A-E, YELLOW_A-E, TEAL_A-E, GOLD_A-E, MAROON_A-B).
 
 ## Spatial constraints — CRITICAL
 The Manim frame is 14.2 × 8 units. Objects outside the safe zone are clipped or invisible.
@@ -64,6 +61,15 @@ The Manim frame is 14.2 × 8 units. Objects outside the safe zone are clipped or
 - Never use font_size > 36 for any text.
 
 **Axes sizing**: x_length ≤ 8, y_length ≤ 4.5. NEVER use x_length=10 or larger — it overflows the frame.
+**Axes numbers**: NEVER use `include_numbers=True` or `add_coordinates()` on Axes — these depend on LaTeX and will crash. Instead, create manual Text() labels positioned with `axes.c2p()`:
+```
+        axes = Axes(x_range=[0, 5, 1], y_range=[0, 100, 20], x_length=7, y_length=4, tips=False)
+        # Manual y-axis labels (NOT include_numbers)
+        for val in [0, 20, 40, 60, 80, 100]:
+            label = Text(str(val), font_size=16)
+            label.next_to(axes.c2p(0, val), LEFT, buff=0.2)
+            axes.add(label)
+```
 
 **Object size limits**:
 - Single centered rectangle/box: width ≤ 8, height ≤ 4.
@@ -86,12 +92,19 @@ The Manim frame is 14.2 × 8 units. Objects outside the safe zone are clipped or
 - CurvedArrow annotations placed .next_to(arrow, RIGHT) easily overflow. Keep annotation text short (<25 chars) and position above or below.
 - Axes with x_length=10: the axes alone span 10 units, leaving no room for y-axis labels or annotations. Always use x_length ≤ 8.
 - Bar charts with many categories: with 6+ bars, labels overlap. Limit to 4-5 bars or use small font_size ≤ 18.
+- GrowArrow(curved_arrow) hangs forever. ALWAYS use Create() for CurvedArrow and CurvedDoubleArrow.
+- Sector(outer_radius=N) crashes. Use Sector(radius=N) instead.
+- ORANGE_C, PURPLE_A, PINK_B, etc. do not exist — NameError crash. Only use exact colors from the whitelist.
+- MathTex/Tex/add_coordinates()/include_numbers crash due to LaTeX. Use Text() with Unicode instead.
+- Pointless try/except: wrapping Text() in try/except with an identical fallback does nothing. Only use try/except when the try and except bodies are DIFFERENT (e.g. MathTex → Text fallback, but since we ban MathTex, this is rarely needed).
+- BarChart class requires LaTeX for labels — use manual Rectangle + Text bar charts instead.
 
 ## Available API
 
-**Objects**: Text, MathTex, Tex, MarkupText, BulletedList, Paragraph, Rectangle, RoundedRectangle, Square, Circle, Ellipse, Arc, Annulus, Sector, AnnularSector, Arrow, CurvedArrow, CurvedDoubleArrow, DoubleArrow, Line, DashedLine, Dot, Star, Triangle, Polygon, RegularPolygon, Brace, BraceLabel, SurroundingRectangle, BackgroundRectangle, Underline, Cross, Cutout, Axes, NumberPlane, ComplexPlane, PolarPlane, BarChart, NumberLine, Code, Table, MathTable, Matrix, DecimalMatrix, IntegerMatrix, VGroup, DecimalNumber, Integer, ValueTracker, always_redraw, TracedPath, VMobject
+**Objects**: Text, MarkupText, BulletedList, Paragraph, Rectangle, RoundedRectangle, Square, Circle, Ellipse, Arc, Annulus, Sector (use `radius=`, NOT `outer_radius=`), AnnularSector, Arrow, CurvedArrow, CurvedDoubleArrow, DoubleArrow, Line, DashedLine, Dot, Star, Triangle, Polygon, RegularPolygon, Brace, BraceLabel, SurroundingRectangle, BackgroundRectangle, Underline, Cross, Cutout, Axes (NO include_numbers, NO add_coordinates), NumberPlane, ComplexPlane, PolarPlane, NumberLine, Code, Table, VGroup, DecimalNumber, Integer, ValueTracker, always_redraw, TracedPath, VMobject
+**BANNED** (crash due to LaTeX): MathTex, Tex, BarChart, MathTable, Matrix, DecimalMatrix, IntegerMatrix. Use Text() with Unicode and manual Rectangle bar charts instead.
 
-**Animations**: Write, FadeIn, FadeOut, Create, Uncreate, DrawBorderThenFill, GrowFromCenter, GrowFromEdge, GrowFromPoint, GrowArrow, SpinInFromNothing, Indicate, Flash, Circumscribe, ShowPassingFlash, Wiggle, FocusOn, Transform, ReplacementTransform, TransformFromCopy, FadeTransform, ClockwiseTransform, CounterclockwiseTransform, ShrinkToCenter, MoveToTarget, MoveAlongPath, Rotate, ApplyWave, ShowIncreasingSubsets, ShowSubmobjectsOneByOne, AnimationGroup, Succession, LaggedStart, LaggedStartMap, AddTextLetterByLetter
+**Animations**: Write, FadeIn, FadeOut, Create, Uncreate, DrawBorderThenFill, GrowFromCenter, GrowFromEdge, GrowFromPoint, GrowArrow (Arrow/DoubleArrow ONLY — NEVER on CurvedArrow), SpinInFromNothing, Indicate, Flash, Circumscribe, ShowPassingFlash, Wiggle, FocusOn, Transform, ReplacementTransform, TransformFromCopy, FadeTransform, ClockwiseTransform, CounterclockwiseTransform, ShrinkToCenter, MoveToTarget, MoveAlongPath, Rotate, ApplyWave, ShowIncreasingSubsets, ShowSubmobjectsOneByOne, AnimationGroup, Succession, LaggedStart, LaggedStartMap, AddTextLetterByLetter
 
 **Colors**: WHITE, GRAY, GREY, RED, RED_A, RED_B, RED_C, RED_D, RED_E, BLUE, BLUE_A, BLUE_B, BLUE_C, BLUE_D, BLUE_E, GREEN, GREEN_A, GREEN_B, GREEN_C, GREEN_D, GREEN_E, YELLOW, YELLOW_A, YELLOW_B, YELLOW_C, YELLOW_D, YELLOW_E, ORANGE, PURPLE, TEAL, TEAL_A, TEAL_B, TEAL_C, TEAL_D, TEAL_E, PINK, GOLD, GOLD_A, GOLD_B, GOLD_C, GOLD_D, GOLD_E, MAROON, MAROON_A, MAROON_B, BLACK
 
@@ -105,7 +118,7 @@ The Manim frame is 14.2 × 8 units. Objects outside the safe zone are clipped or
 ## Visual strategy patterns
 Follow the VISUAL_STRATEGY hint to choose the right layout. Every segment MUST have at least 3 distinct visual elements — NOT just text cards.
 
-**data_chart**: Use BarChart (limit 4-5 bars) or Axes (x_length ≤ 8, y_length ≤ 4.5) with plotted points/lines. Show real numbers from the paper. Add labels and a title. Animate bars growing or points appearing sequentially. For manual bar charts, use Rectangle + Text labels.
+**data_chart**: Use Axes (x_length ≤ 8, y_length ≤ 4.5, NO include_numbers) with plotted points/lines, or manual bar charts with Rectangle + Text labels. Show real numbers from the paper. Add Text labels and a title. Animate bars growing (GrowFromEdge) or points appearing sequentially. Do NOT use BarChart class (requires LaTeX).
 
 **comparison**: Two-column layout. Left column (RED) = old/baseline, right column (GREEN) = new/proposed. Use RoundedRectangles as containers with Text labels inside. Connect with Arrows showing improvement. Animate left side first, then right side, then comparison arrows.
 
@@ -121,7 +134,7 @@ Follow the VISUAL_STRATEGY hint to choose the right layout. Every segment MUST h
 
 **layered_diagram**: Stacked horizontal rectangles (like a layer cake) with labels inside each. Bottom = foundation, top = application. Animate bottom-up. Use Braces on the side to group related layers.
 
-**equation**: Center the key equation (MathTex with try/except). Surround with annotating arrows/braces pointing to terms with Text labels explaining each part. Animate: show equation → highlight and label each term sequentially.
+**equation**: Center the key equation using Text() with Unicode math symbols (², ³, ∑, ∈, ≤, ≥, →, ×, ÷, π, θ, α, β, λ). Surround with annotating arrows/braces pointing to terms with Text labels explaining each part. Animate: show equation → highlight and label each term sequentially.
 
 **auto** (fallback): Analyze the narration content and pick the most appropriate pattern from above. Qualitative content → concept_map or metaphor. Quantitative → data_chart. Sequential → process_flow.
 

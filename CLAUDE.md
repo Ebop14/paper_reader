@@ -10,7 +10,7 @@ cp .env.example .env   # set ANTHROPIC_API_KEY
 python run.py           # http://localhost:8000
 ```
 
-Requires `brew install ffmpeg` for MP3/MP4 export, `brew install py3cairo pango` for Manim, and `brew install --cask basictex` for LaTeX (used by MathTex, BarChart, Axes numbers). Python venv already set up in `.venv/`.
+Requires `brew install ffmpeg` for MP3/MP4 export, `brew install py3cairo pango` for Manim, and `brew install --cask basictex` for LaTeX. Note: LaTeX is currently unreliable (missing `standalone.cls`); the annotator prompt bans MathTex/Tex/BarChart and uses Text() with Unicode instead. Python venv already set up in `.venv/`.
 
 ## Architecture
 
@@ -113,7 +113,7 @@ data/                    # Runtime storage, gitignored
 ## Key Patterns
 
 - **Pipeline orchestration**: `director_service` coordinates script → annotate → validate → voiceover → animation → compositing phases. Task registry tracks `stage` and `stage_progress` alongside overall progress. Frontend renders a 7-step stage indicator (Loading → Scripting → Annotating → Voiceover → Animation → Compositing → Done). `run_from_script()` allows re-rendering animation+compositing from an existing annotated script without re-running the full pipeline.
-- **LLM-generated Manim code**: `annotator_service` uses Claude Opus (`claude-opus-4-20250514`) to write complete Manim `construct()` body code per segment. The LLM receives narration text, paper source data, and target duration, then writes Python code using the full Manim Community Edition API (v0.20.0). The system prompt enumerates all 50+ available object types, 35+ animations, 46 colors, and positioning constants — all verified to exist in the installed version. Code is stored in `segment.manim_code` and rendered directly.
+- **LLM-generated Manim code**: `annotator_service` uses Claude Opus (`claude-opus-4-20250514`) to write complete Manim `construct()` body code per segment. The LLM receives narration text, paper source data, and target duration, then writes Python code using the Manim Community Edition API (v0.20.0). The system prompt bans LaTeX-dependent features (MathTex, Tex, BarChart, include_numbers, add_coordinates) since `standalone.cls` is missing; all text uses `Text()` with Unicode. It also bans `GrowArrow` on `CurvedArrow` (hangs), `Sector(outer_radius=)` (TypeError), and non-existent color variants like `ORANGE_C` (NameError). Code is stored in `segment.manim_code` and rendered directly.
 - **Animation rendering**: `animation_service` wraps LLM-generated code in a `Scene` class and renders via Manim CLI in a `ProcessPoolExecutor(1)`. On render failure, falls back to a simple title card. No template translation layer — the LLM writes the scene code end-to-end.
 - **Video compositing with loop**: `compositor_service` uses `-stream_loop -1` to loop the animation video indefinitely, then `-shortest` trims to audio length. This ensures the full voiceover is preserved even when animations are shorter than speech. Re-encodes with `libx264 -preset ultrafast -crf 28`.
 - **Duration estimation at 90 wpm**: `_estimate_duration()` uses 90 wpm (not the typical 150 wpm) because Qwen3-TTS speaks at ~1.5 words/sec. Accurate estimates ensure the annotator writes appropriately-timed animations.

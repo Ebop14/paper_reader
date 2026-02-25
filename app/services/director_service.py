@@ -135,6 +135,72 @@ def _clear_renders(paper_id: str) -> None:
             shutil.rmtree(d)
 
 
+async def run_reannotate(paper_id: str, task_id: str) -> None:
+    """Load existing script, re-generate manim code, then re-render animations + compositing."""
+    try:
+        update_task(task_id, stage="loading", message="Loading script and paper...")
+        script = _load_script(paper_id)
+        meta = _load_paper_meta(paper_id)
+        chunk_groups = _group_sections(meta.sections)
+
+        # Clear old renders
+        _clear_renders(paper_id)
+        for seg in script.segments:
+            seg.manim_code = ""
+            seg.animation_hints = []
+            seg.animation_file = None
+        script.video_file = None
+
+        # Re-annotate with fresh manim code
+        update_task(
+            task_id,
+            stage="annotating",
+            stage_progress=0.0,
+            message="Re-generating animation code...",
+        )
+        script = await annotate_script(script, meta, chunk_groups, task_id)
+
+        # Validate hints for UI display
+        update_task(task_id, message="Validating animation hints...")
+        segment_dicts = [s.model_dump() for s in script.segments]
+        repaired = validate_and_repair_hints(segment_dicts)
+        script.segments = [ScriptSegment(**s) for s in repaired]
+        _save_script(paper_id, script)
+
+        # Animation rendering
+        update_task(
+            task_id,
+            stage="animation",
+            stage_progress=0.0,
+            message="Starting animation rendering...",
+        )
+        script = await generate_animations(paper_id, script, task_id)
+        _save_script(paper_id, script)
+
+        # Compositing
+        update_task(
+            task_id,
+            stage="compositing",
+            stage_progress=0.0,
+            message="Starting video compositing...",
+        )
+        final_video = await composite_video(paper_id, script, task_id)
+        script.video_file = final_video.name
+        _save_script(paper_id, script)
+
+        update_task(
+            task_id,
+            status="completed",
+            stage="done",
+            stage_progress=1.0,
+            progress=1.0,
+            message="Re-annotation complete",
+        )
+
+    except Exception as e:
+        update_task(task_id, status="failed", message=str(e))
+
+
 async def run_from_script(paper_id: str, task_id: str) -> None:
     """Load an existing annotated script and run animation + compositing only."""
     try:

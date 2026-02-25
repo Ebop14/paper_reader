@@ -50,6 +50,18 @@ const API = {
         return this._sse(`/api/pipeline/${paperId}/render/stream`, onEvent);
     },
 
+    async startReannotate(paperId) {
+        const res = await fetch(`/api/pipeline/${paperId}/reannotate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        return res.json();
+    },
+
+    streamReannotate(paperId, onEvent) {
+        return this._sse(`/api/pipeline/${paperId}/reannotate/stream`, onEvent);
+    },
+
     async getScript(paperId) {
         const res = await fetch(`/api/pipeline/${paperId}/script`);
         if (!res.ok) return null;

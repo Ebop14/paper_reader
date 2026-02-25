@@ -1,10 +1,13 @@
 import asyncio
 import functools
 import json
+import logging
 import subprocess
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from app.models import AnimationHint
 from app.storage import animations_dir
@@ -131,9 +134,11 @@ async def render_segment(
                 ),
             )
             return output_path
-        except Exception:
-            # LLM code failed to render — fall through to fallback
-            pass
+        except Exception as exc:
+            logger.error(
+                "Segment %d render failed, falling back to title card: %s",
+                segment_index, exc,
+            )
 
     # Fallback: title card
     fallback_code = _title_card_code(section_title, duration)

@@ -24,7 +24,7 @@ from app.tasks.processing import update_task
 
 ANIMATOR_SYSTEM = """You are an expert Manim Community Edition animator creating educational video segments for academic papers.
 
-You will be given a segment's narration text, the original paper source, and a target duration. Write the BODY of a Manim Scene's `construct(self)` method. Your code will be inserted into:
+You will be given a segment's narration text, the original paper source, a target duration, and a VISUAL_STRATEGY hint. Write the BODY of a Manim Scene's `construct(self)` method. Your code will be inserted into:
 
 ```python
 from manim import *
@@ -52,19 +52,78 @@ class SegmentScene(Scene):
 - Do NOT use `self.camera` or `self.renderer` — just standard Scene methods.
 - Do NOT define new classes or functions — write straight-line construct() code.
 
+## Spatial constraints — CRITICAL
+The Manim frame is 14.2 × 8 units. Objects outside the safe zone are clipped or invisible.
+
+**Safe zone**: x ∈ [-6.5, 6.5], y ∈ [-3.5, 3.5]. Never place objects beyond these bounds.
+
+**Text size limits**:
+- Title: font_size ≤ 36, max ~30 characters. Longer? Split into two lines or use scale().
+- Body text: font_size ≤ 26, max ~45 characters per line.
+- Labels: font_size ≤ 22.
+- Never use font_size > 36 for any text.
+
+**Axes sizing**: x_length ≤ 8, y_length ≤ 4.5. NEVER use x_length=10 or larger — it overflows the frame.
+
+**Object size limits**:
+- Single centered rectangle/box: width ≤ 8, height ≤ 4.
+- Two-column layout: each column at x = ±3, width ≤ 5 each.
+- Three-column layout: columns at x = {-4, 0, +4}, width ≤ 3.5 each.
+
+**Overflow guard — ALWAYS add after building any VGroup, especially lists/charts**:
+```
+        if group.width > 12:
+            group.scale_to_fit_width(12)
+        if group.height > 7:
+            group.scale_to_fit_height(7)
+```
+
+**Common traps to AVOID**:
+- BulletedList with long items overflows right. Prefer VGroup of short Text items with arrange(DOWN).
+- Chained .next_to() calls accumulate offset — check final position with .get_center().
+- .to_edge() pushes objects to y=±3.7 / x=±6.7 — leave room for labels/braces next to them.
+- Placing annotations with .next_to(obj, RIGHT) when obj is already near x=5 pushes text off-screen. Use .next_to(obj, UP) or .next_to(obj, DOWN) instead, or move_to a safe absolute position.
+- CurvedArrow annotations placed .next_to(arrow, RIGHT) easily overflow. Keep annotation text short (<25 chars) and position above or below.
+- Axes with x_length=10: the axes alone span 10 units, leaving no room for y-axis labels or annotations. Always use x_length ≤ 8.
+- Bar charts with many categories: with 6+ bars, labels overlap. Limit to 4-5 bars or use small font_size ≤ 18.
+
 ## Available API
 
-**Objects**: Text, MathTex, Tex, MarkupText, BulletedList, Paragraph, Rectangle, RoundedRectangle, Square, Circle, Ellipse, Arc, Annulus, Sector, AnnularSector, Arrow, CurvedArrow, CurvedDoubleArrow, DoubleArrow, Line, DashedLine, Dot, Star, Triangle, Polygon, RegularPolygon, Brace, BraceLabel, SurroundingRectangle, BackgroundRectangle, Underline, Cross, Cutout, Axes, NumberPlane, ComplexPlane, PolarPlane, BarChart, NumberLine, Code, Table, MathTable, Matrix, DecimalMatrix, IntegerMatrix, VGroup, DecimalNumber, Integer, ValueTracker, always_redraw, TracedPath
+**Objects**: Text, MathTex, Tex, MarkupText, BulletedList, Paragraph, Rectangle, RoundedRectangle, Square, Circle, Ellipse, Arc, Annulus, Sector, AnnularSector, Arrow, CurvedArrow, CurvedDoubleArrow, DoubleArrow, Line, DashedLine, Dot, Star, Triangle, Polygon, RegularPolygon, Brace, BraceLabel, SurroundingRectangle, BackgroundRectangle, Underline, Cross, Cutout, Axes, NumberPlane, ComplexPlane, PolarPlane, BarChart, NumberLine, Code, Table, MathTable, Matrix, DecimalMatrix, IntegerMatrix, VGroup, DecimalNumber, Integer, ValueTracker, always_redraw, TracedPath, VMobject
 
 **Animations**: Write, FadeIn, FadeOut, Create, Uncreate, DrawBorderThenFill, GrowFromCenter, GrowFromEdge, GrowFromPoint, GrowArrow, SpinInFromNothing, Indicate, Flash, Circumscribe, ShowPassingFlash, Wiggle, FocusOn, Transform, ReplacementTransform, TransformFromCopy, FadeTransform, ClockwiseTransform, CounterclockwiseTransform, ShrinkToCenter, MoveToTarget, MoveAlongPath, Rotate, ApplyWave, ShowIncreasingSubsets, ShowSubmobjectsOneByOne, AnimationGroup, Succession, LaggedStart, LaggedStartMap, AddTextLetterByLetter
 
 **Colors**: WHITE, GRAY, GREY, RED, RED_A, RED_B, RED_C, RED_D, RED_E, BLUE, BLUE_A, BLUE_B, BLUE_C, BLUE_D, BLUE_E, GREEN, GREEN_A, GREEN_B, GREEN_C, GREEN_D, GREEN_E, YELLOW, YELLOW_A, YELLOW_B, YELLOW_C, YELLOW_D, YELLOW_E, ORANGE, PURPLE, TEAL, TEAL_A, TEAL_B, TEAL_C, TEAL_D, TEAL_E, PINK, GOLD, GOLD_A, GOLD_B, GOLD_C, GOLD_D, GOLD_E, MAROON, MAROON_A, MAROON_B, BLACK
 
+**Color semantics**: RED = problems, limitations, old approach. GREEN = solutions, improvements, new approach. BLUE = neutral methods, tools, processes. GOLD = key insights, important findings.
+
 **Positioning**: ORIGIN, UP, DOWN, LEFT, RIGHT, UL, UR, DL, DR
   .to_edge(UP), .to_corner(UL), .next_to(other, DOWN), .move_to([x, y, 0]), .shift(LEFT * 2)
-  Coordinate range: x ∈ [-7, 7], y ∈ [-4, 4]
 
 **Formatting**: .scale(), .set_color(), .arrange(DOWN), .set_opacity(), .set_stroke(), .set_fill()
+
+## Visual strategy patterns
+Follow the VISUAL_STRATEGY hint to choose the right layout. Every segment MUST have at least 3 distinct visual elements — NOT just text cards.
+
+**data_chart**: Use BarChart (limit 4-5 bars) or Axes (x_length ≤ 8, y_length ≤ 4.5) with plotted points/lines. Show real numbers from the paper. Add labels and a title. Animate bars growing or points appearing sequentially. For manual bar charts, use Rectangle + Text labels.
+
+**comparison**: Two-column layout. Left column (RED) = old/baseline, right column (GREEN) = new/proposed. Use RoundedRectangles as containers with Text labels inside. Connect with Arrows showing improvement. Animate left side first, then right side, then comparison arrows.
+
+**process_flow**: Left-to-right or top-to-bottom sequence of RoundedRectangle boxes connected by Arrows. 3-5 steps max. Animate each box appearing then its connecting arrow. Use color gradient from BLUE to GREEN to show progression.
+
+**concept_map**: Central node (Circle or RoundedRectangle) with branching connections (Lines/Arrows) to satellite nodes. Use different colors for different branches. Animate center first, then branches with LaggedStart.
+
+**timeline**: Horizontal NumberLine or Line with Dots at key points and Text labels above/below alternating. Animate left to right. Use color to highlight the current paper's contribution.
+
+**metaphor**: Build the concrete visual analogy from speaker_notes. Use shapes, arrows, and labels to illustrate the metaphor. E.g., "filter" → show objects passing through a barrier with some blocked (RED) and some passing (GREEN). At least 4 visual objects.
+
+**highlight_list**: Vertical stack of 3-5 items. Each item is an icon shape (Circle, Star, Arrow) + short Text label in a row. Animate with LaggedStart. Highlight the most important item with Indicate or color change.
+
+**layered_diagram**: Stacked horizontal rectangles (like a layer cake) with labels inside each. Bottom = foundation, top = application. Animate bottom-up. Use Braces on the side to group related layers.
+
+**equation**: Center the key equation (MathTex with try/except). Surround with annotating arrows/braces pointing to terms with Text labels explaining each part. Animate: show equation → highlight and label each term sequentially.
+
+**auto** (fallback): Analyze the narration content and pick the most appropriate pattern from above. Qualitative content → concept_map or metaphor. Quantitative → data_chart. Sequential → process_flow.
 
 ## Style guide
 - Use progressive reveal: build up complexity step by step
@@ -119,15 +178,22 @@ async def _generate_manim_code(
     section_title: str,
     paper_source_text: str,
     duration: float,
+    speaker_notes: str = "",
+    visual_strategy: str = "",
 ) -> str:
     """Call Claude to generate Manim construct() body for one segment."""
     client = _get_client()
 
     content = (
         f"## Section: {section_title}\n"
-        f"## DURATION: {duration:.0f} seconds\n\n"
+        f"## DURATION: {duration:.0f} seconds\n"
+        f"## VISUAL_STRATEGY: {visual_strategy or 'auto'}\n\n"
         f"### Narration text (what the audience hears during this animation)\n"
         f"{narration_text}\n\n"
+    )
+    if speaker_notes:
+        content += f"### Speaker notes (visual intent from the writer)\n{speaker_notes}\n\n"
+    content += (
         f"### Paper source text (use real data from here)\n"
         f"{paper_source_text[:6000]}\n"
     )
@@ -166,6 +232,8 @@ async def annotate_segment(
     section_title: str,
     paper_source_text: str,
     duration: float = 20.0,
+    speaker_notes: str = "",
+    visual_strategy: str = "",
 ) -> tuple[str, list[AnimationHint]]:
     """Generate Manim code and minimal display hints for a single segment.
 
@@ -175,6 +243,7 @@ async def annotate_segment(
     """
     code = await _generate_manim_code(
         narration_text, section_title, paper_source_text, duration,
+        speaker_notes=speaker_notes, visual_strategy=visual_strategy,
     )
 
     # Create a minimal hint for UI badge display
@@ -237,6 +306,8 @@ async def annotate_script(
             segment.section_title,
             paper_source,
             duration,
+            speaker_notes=segment.speaker_notes,
+            visual_strategy=segment.visual_strategy,
         )
         segment.manim_code = code
         segment.animation_hints = hints

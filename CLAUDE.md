@@ -10,7 +10,7 @@ cp .env.example .env   # set ANTHROPIC_API_KEY
 python run.py           # http://localhost:8000
 ```
 
-Requires `brew install ffmpeg` for MP3/MP4 export and `brew install py3cairo pango` for Manim. Python venv already set up in `.venv/`.
+Requires `brew install ffmpeg` for MP3/MP4 export, `brew install py3cairo pango` for Manim, and `brew install --cask basictex` for LaTeX (used by MathTex, BarChart, Axes numbers). Python venv already set up in `.venv/`.
 
 ## Architecture
 

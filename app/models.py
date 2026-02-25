@@ -86,6 +86,7 @@ class ScriptSegment(BaseModel):
     source_chunk_indices: list[int] = Field(default_factory=list)
     narration_text: str
     speaker_notes: str = ""
+    visual_strategy: str = ""
     animation_hints: list[AnimationHint] = Field(default_factory=list)
     manim_code: str = ""  # Raw Manim construct() body written by LLM
     estimated_duration_seconds: float = 0.0

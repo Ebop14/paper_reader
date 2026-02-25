@@ -72,9 +72,13 @@ const UI = {
                 hintsHtml += '</div>';
             }
 
+            const strategyBadge = seg.visual_strategy
+                ? `<span class="strategy-badge">${this.escHtml(seg.visual_strategy)}</span>`
+                : '';
+
             card.innerHTML = `
                 <div class="segment-header">
-                    <span class="segment-title">${this.escHtml(seg.section_title)}</span>
+                    <span class="segment-title">${this.escHtml(seg.section_title)}${strategyBadge}</span>
                     <span class="segment-duration">${duration}</span>
                 </div>
                 <div class="segment-narration">${this.escHtml(seg.narration_text)}</div>

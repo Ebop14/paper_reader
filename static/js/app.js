@@ -6,6 +6,8 @@ const App = {
         chunks: [],
         currentChunk: 0,
         playing: false,
+        animations: [],
+        currentAnimation: 0,
     },
 
     mixer: new AudioMixer(),
@@ -51,6 +53,10 @@ const App = {
         UI.$('btn-export').onclick = () => this.exportVoiceover();
         UI.$('btn-export-video').onclick = () => this.exportVideo();
 
+        // Animation browser
+        UI.$('btn-anim-prev').onclick = () => this.prevAnimation();
+        UI.$('btn-anim-next').onclick = () => this.nextAnimation();
+
         // Speech ended -> next chunk
         this.mixer.onSpeechEnded(() => this.nextChunk());
     },
@@ -58,17 +64,43 @@ const App = {
     // --- Papers ---
     async loadPapers() {
         this.state.papers = await API.listPapers();
-        UI.renderPaperList(this.state.papers, this.state.activePaper?.id, (p) => this.selectPaper(p));
+        UI.renderPaperList(this.state.papers, this.state.activePaper?.id, (p) => this.selectPaper(p), (p) => this.deletePaper(p));
     },
 
     async uploadPaper(file) {
         try {
             const meta = await API.uploadPaper(file);
             this.state.papers.push(meta);
-            UI.renderPaperList(this.state.papers, null, (p) => this.selectPaper(p));
+            UI.renderPaperList(this.state.papers, null, (p) => this.selectPaper(p), (p) => this.deletePaper(p));
             this.selectPaper(meta);
         } catch (e) {
             alert('Upload failed: ' + e.message);
+        }
+    },
+
+    async deletePaper(paper) {
+        if (!confirm(`Delete "${paper.filename}" and all its data?`)) return;
+        try {
+            await API.deletePaper(paper.id);
+            this.state.papers = this.state.papers.filter(p => p.id !== paper.id);
+            if (this.state.activePaper?.id === paper.id) {
+                this.state.activePaper = null;
+                this.state.script = null;
+                this.state.chunks = [];
+                this.state.animations = [];
+                this.state.playing = false;
+                this.mixer.pauseSpeech();
+                UI.$('text-title').textContent = '';
+                UI.$('text-content').innerHTML = '<p class="placeholder">Select a paper to view</p>';
+                UI.$('pipeline-controls').style.display = 'none';
+                UI.$('pipeline-stages').style.display = 'none';
+                UI.setPlayerVisible(false);
+                UI.hideVideoPlayer();
+                UI.hideAnimationBrowser();
+            }
+            UI.renderPaperList(this.state.papers, this.state.activePaper?.id, (p) => this.selectPaper(p), (p) => this.deletePaper(p));
+        } catch (e) {
+            alert('Delete failed: ' + e.message);
         }
     },
 
@@ -76,10 +108,12 @@ const App = {
         this.state.activePaper = paper;
         this.state.script = null;
         this.state.chunks = [];
+        this.state.animations = [];
         this.state.currentChunk = 0;
+        this.state.currentAnimation = 0;
         this.state.playing = false;
 
-        UI.renderPaperList(this.state.papers, paper.id, (p) => this.selectPaper(p));
+        UI.renderPaperList(this.state.papers, paper.id, (p) => this.selectPaper(p), (p) => this.deletePaper(p));
         UI.$('text-title').textContent = paper.filename;
         UI.$('pipeline-controls').style.display = 'flex';
         UI.$('pipeline-stages').style.display = 'none';
@@ -108,6 +142,9 @@ const App = {
         } else {
             UI.setPlayerVisible(false);
         }
+
+        // Check for existing animations
+        await this.loadAnimations();
 
         // Check for existing video
         if (script && script.video_file) {
@@ -160,6 +197,7 @@ const App = {
                     }
                 }
                 this.refreshChunks();
+                await this.loadAnimations();
             } else if (data.status === 'failed') {
                 UI.$('btn-generate').disabled = false;
                 alert('Pipeline failed: ' + data.message);
@@ -190,6 +228,7 @@ const App = {
                         UI.showVideoPlayer(API.videoURL(paper.id));
                     }
                 }
+                await this.loadAnimations();
             } else if (data.status === 'failed') {
                 UI.$('btn-render').disabled = false;
                 UI.$('btn-generate').disabled = false;
@@ -265,6 +304,51 @@ const App = {
             UI.highlightChunk(this.state.currentChunk);
             UI.scrollToChunk(this.state.currentChunk);
         }
+    },
+
+    // --- Animations ---
+    async loadAnimations() {
+        const paper = this.state.activePaper;
+        if (!paper) return;
+        const anims = await API.listAnimations(paper.id);
+        this.state.animations = anims;
+        this.state.currentAnimation = 0;
+        if (anims.length > 0) {
+            this.showAnimation(0);
+        } else {
+            UI.hideAnimationBrowser();
+        }
+    },
+
+    showAnimation(index) {
+        const paper = this.state.activePaper;
+        const anims = this.state.animations;
+        if (!paper || anims.length === 0) return;
+        index = Math.max(0, Math.min(index, anims.length - 1));
+        this.state.currentAnimation = index;
+
+        const anim = anims[index];
+        const url = API.animationURL(paper.id, anim.filename);
+
+        // Try to find the matching segment title from the script
+        let title = '';
+        if (this.state.script && this.state.script.segments[index]) {
+            title = this.state.script.segments[index].section_title;
+        }
+
+        UI.showAnimationBrowser(url, index + 1, anims.length, title);
+        UI.highlightChunk(index);
+        UI.scrollToChunk(index);
+    },
+
+    prevAnimation() {
+        if (this.state.animations.length === 0) return;
+        this.showAnimation(this.state.currentAnimation - 1);
+    },
+
+    nextAnimation() {
+        if (this.state.animations.length === 0) return;
+        this.showAnimation(this.state.currentAnimation + 1);
     },
 
     // --- Export ---

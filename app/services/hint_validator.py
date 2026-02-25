@@ -91,6 +91,13 @@ def _validate_hint(hint: dict, section_title: str = "") -> dict:
     # Validate steps
     hint["steps"] = [_validate_step(s) for s in hint.get("steps", [])]
 
+    # Repair empty step targets: match to declared objects by index
+    obj_names = [o.get("name", "") for o in hint["objects"] if o.get("name")]
+    if obj_names:
+        for i, step in enumerate(hint["steps"]):
+            if not step.get("target", "").strip():
+                step["target"] = obj_names[min(i, len(obj_names) - 1)]
+
     # Clamp fractions
     sf = hint.get("start_fraction", 0.0)
     ef = hint.get("end_fraction", 1.0)

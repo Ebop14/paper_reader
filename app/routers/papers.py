@@ -1,4 +1,5 @@
 import json
+import shutil
 import uuid
 from pathlib import Path
 
@@ -6,7 +7,10 @@ from fastapi import APIRouter, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.models import PaperMeta, PaperSection, ProcessRequest
-from app.storage import papers_dir, processed_dir
+from app.storage import (
+    papers_dir, processed_dir, audio_dir, scripts_dir,
+    animations_dir, videos_dir, exports_dir,
+)
 from app.services.pdf_service import process_pdf
 from app.services.llm_service import process_chunks
 from app.tasks.processing import task_registry, create_task, update_task, sse_stream
@@ -63,6 +67,21 @@ async def list_papers():
             if meta_path.exists():
                 results.append(json.loads(meta_path.read_text()))
     return results
+
+
+@router.delete("/{paper_id}")
+async def delete_paper(paper_id: str):
+    meta_path = papers_dir() / paper_id / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(404, "Paper not found")
+
+    for dir_fn in (papers_dir, processed_dir, audio_dir, scripts_dir,
+                   animations_dir, videos_dir, exports_dir):
+        target = dir_fn() / paper_id
+        if target.exists():
+            shutil.rmtree(target)
+
+    return {"status": "deleted", "paper_id": paper_id}
 
 
 @router.post("/{paper_id}/process")

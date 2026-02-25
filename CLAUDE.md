@@ -1,6 +1,6 @@
 # Paper Reader
 
-Upload academic PDFs, generate video scripts with Claude (parallel scriptwriting + aggregation), convert to voiceover with Qwen3-TTS via MLX on Apple Silicon, render Manim animations per segment, composite into final MP4 with ffmpeg, and play back with segment-level navigation.
+Upload academic PDFs, generate video scripts with Claude (parallel scriptwriting + aggregation), convert to voiceover with Qwen3-TTS via MLX on Apple Silicon, render Manim animations per segment (LLM-generated scene code), composite into final MP4 with ffmpeg, and play back with segment-level navigation.
 
 ## Quick Start
 
@@ -26,7 +26,7 @@ app/
 ├── models.py            # Pydantic schemas (Paper*, Script*, Pipeline*, AnimationHint)
 ├── storage.py           # Path helpers for data/{papers,processed,audio,scripts,exports,animations,videos}/
 ├── routers/
-│   ├── papers.py        # PDF upload, LLM processing, SSE progress
+│   ├── papers.py        # PDF upload/delete, LLM processing, SSE progress
 │   ├── tts.py           # TTS generation (legacy, kept for backward compat)
 │   └── pipeline.py      # Video pipeline: start, SSE stream, script, audio, animations, video, export
 ├── services/
@@ -36,12 +36,12 @@ app/
 │   ├── audio_service.py # pydub concat + overlay + MP3 export
 │   ├── director_service.py    # Pipeline orchestrator (load → script → annotate → voiceover → animation → compositing → save)
 │   ├── scriptwriter_service.py # Parallel Claude scriptwriting + aggregation (narration only, no animation hints)
-│   ├── annotator_service.py   # Word-anchored annotation agent (separate LLM pass, 4-8 hints/segment, anchor_text→fraction)
-│   ├── hint_validator.py      # Validate/repair animation hints (whitelist checks, fraction normalization, min density)
+│   ├── annotator_service.py   # Manim code generation agent (Claude Opus writes construct() body directly)
+│   ├── hint_validator.py      # Validate/repair animation hints for UI display (whitelist checks, fraction normalization)
 │   ├── voiceover_service.py   # TTS wrapper with duration measurement per segment
-│   ├── animation_service.py   # Manim renderer (ProcessPoolExecutor, rich scene builder + legacy hint→Scene mapping)
+│   ├── animation_service.py   # Manim renderer (ProcessPoolExecutor, renders LLM-generated scene code, title card fallback)
 │   ├── animation_orchestrator.py # Iterates segments, renders animations, patches script
-│   └── compositor_service.py  # ffmpeg mux (video+audio per segment) + concat to final MP4
+│   └── compositor_service.py  # ffmpeg mux (video loops to match audio) + concat to final MP4
 └── tasks/
     └── processing.py    # In-memory task registry + SSE stream generator (supports stages)
 
@@ -50,15 +50,15 @@ static/
 ├── css/style.css
 └── js/
     ├── api.js           # Fetch + EventSource SSE client
-    ├── app.js           # Main state + pipeline flow
-    ├── ui.js            # DOM rendering (papers, script segments, pipeline stages)
+    ├── app.js           # Main state + pipeline flow + animation browser
+    ├── ui.js            # DOM rendering (papers, script segments, pipeline stages, animation nav)
     └── audio-mixer.js   # Web Audio API dual-source mixer with GainNodes
 
 data/                    # Runtime storage, gitignored
 ├── papers/{id}/         # Uploaded PDFs + meta.json
 ├── processed/{id}/      # verbatim.json / narrated.json (legacy)
 ├── audio/{id}/          # chunk_NNNN.wav files
-├── scripts/{id}/        # script.json (VideoScript with segments + animation hints)
+├── scripts/{id}/        # script.json (VideoScript with segments + manim_code)
 ├── animations/{id}/     # segment_NNNN.mp4 Manim-rendered clips
 ├── videos/{id}/         # video.mp4 final composited video
 └── exports/             # Voiceover MP3 files
@@ -70,16 +70,17 @@ data/                    # Runtime storage, gitignored
 2. **Generate Video** (pipeline) →
    - `director_service.run_pipeline()` orchestrates all phases
    - Phase 1: Load paper meta, group sections by title
-   - Phase 2: `scriptwriter_service.write_script()` — parallel Claude calls per section group, then aggregator adds intro/outro/transitions → `VideoScript` with narration only (empty animation_hints)
-   - Phase 2b: `annotator_service.annotate_script()` — separate LLM pass per segment, generates 4-8 word-anchored animation hints with `anchor_text` → computes `start_fraction`/`end_fraction` from word positions
-   - Phase 2c: `hint_validator.validate_and_repair_hints()` — whitelist checks, fraction normalization, minimum hint density padding
+   - Phase 2: `scriptwriter_service.write_script()` — parallel Claude calls per section group, then aggregator adds intro/outro/transitions → `VideoScript` with narration only (empty animation_hints). Duration estimated at 90 wpm to match Qwen3-TTS speaking rate.
+   - Phase 2b: `annotator_service.annotate_script()` — Claude Opus generates complete Manim `construct()` body per segment, stored in `segment.manim_code`. Minimal `animation_hints` kept for UI badge display only.
+   - Phase 2c: `hint_validator.validate_and_repair_hints()` — validates display hints (not used for rendering)
    - Phase 3: `voiceover_service.generate_voiceover()` — sequential TTS per segment via `tts_service.generate_chunk()`, measures actual durations with pydub
-   - Phase 4: `animation_orchestrator.generate_animations()` — sequential Manim render per segment via `animation_service.render_segment()`, rich scene builder for objects/steps hints, legacy path for type-based hints
-   - Phase 5: `compositor_service.composite_video()` — ffmpeg mux (video+audio per segment), then concat into final MP4
+   - Phase 4: `animation_orchestrator.generate_animations()` — sequential Manim render per segment via `animation_service.render_segment()`. Uses `segment.manim_code` directly when present; falls back to title card on render failure.
+   - Phase 5: `compositor_service.composite_video()` — ffmpeg mux per segment (video loops to fill audio duration), then concat into final MP4
    - Script saved to `data/scripts/{id}/script.json` after each phase
-3. **Re-render Video** → `director_service.run_from_script()` loads existing annotated script, clears old animation/video files, runs Phase 4 + Phase 5 only. Triggered via `POST /api/pipeline/{id}/render`.
-4. **Play** → Web Audio API plays speech segments with volume control, segment-level prev/next. Video player shows final MP4.
-5. **Export** → pydub concatenates WAVs, exports MP3. ffmpeg serves final MP4 for download.
+3. **Re-render Video** → `director_service.run_from_script()` loads existing script, clears old animation/video files, runs Phase 4 + Phase 5 only. Triggered via `POST /api/pipeline/{id}/render`.
+4. **Delete Paper** → `DELETE /api/papers/{id}` removes all data across papers, processed, audio, scripts, animations, videos, exports directories.
+5. **Play** → Web Audio API plays speech segments with volume control, segment-level prev/next. Video player shows final MP4. Animation browser lets you cycle through individual segment animations.
+6. **Export** → pydub concatenates WAVs, exports MP3. ffmpeg serves final MP4 for download.
 
 ### API Endpoints
 
@@ -88,6 +89,7 @@ data/                    # Runtime storage, gitignored
 | POST | `/api/papers/upload` | Upload PDF, extract text |
 | GET | `/api/papers` | List all papers |
 | GET | `/api/papers/{id}` | Get paper metadata |
+| DELETE | `/api/papers/{id}` | Delete paper and all associated data |
 | POST | `/api/papers/{id}/process` | Start LLM processing (body: `{mode}`) |
 | GET | `/api/papers/{id}/process/stream` | SSE progress (`?mode=verbatim`) |
 | GET | `/api/papers/{id}/processed/{mode}` | Get processed sections JSON |
@@ -111,13 +113,15 @@ data/                    # Runtime storage, gitignored
 ## Key Patterns
 
 - **Pipeline orchestration**: `director_service` coordinates script → annotate → validate → voiceover → animation → compositing phases. Task registry tracks `stage` and `stage_progress` alongside overall progress. Frontend renders a 7-step stage indicator (Loading → Scripting → Annotating → Voiceover → Animation → Compositing → Done). `run_from_script()` allows re-rendering animation+compositing from an existing annotated script without re-running the full pipeline.
-- **Separated scriptwriting and annotation**: `scriptwriter_service` produces narration-only segments (empty `animation_hints`). `annotator_service` runs a separate LLM pass per segment to generate 4-8 word-anchored animation hints with `anchor_text` fields. This separation lets each agent focus on its strength.
-- **Word-anchored animation hints**: Each `AnimationHint` has an `anchor_text` field — a verbatim phrase from the narration (3-8 words). `_compute_fractions_from_anchor()` maps word positions to `start_fraction`/`end_fraction` so animations sync with speech. Falls back to even spacing if anchor not found.
-- **Hint validation**: `hint_validator` validates/repairs hints before rendering: mobject_type, action, and color whitelists; duration clamping; fraction normalization; minimum 2 hints per segment (pads with title cards). Validates `anchor_text` — uses section_title as fallback if empty.
+- **LLM-generated Manim code**: `annotator_service` uses Claude Opus (`claude-opus-4-20250514`) to write complete Manim `construct()` body code per segment. The LLM receives narration text, paper source data, and target duration, then writes Python code using the full Manim Community Edition API (v0.20.0). The system prompt enumerates all 50+ available object types, 35+ animations, 46 colors, and positioning constants — all verified to exist in the installed version. Code is stored in `segment.manim_code` and rendered directly.
+- **Animation rendering**: `animation_service` wraps LLM-generated code in a `Scene` class and renders via Manim CLI in a `ProcessPoolExecutor(1)`. On render failure, falls back to a simple title card. No template translation layer — the LLM writes the scene code end-to-end.
+- **Video compositing with loop**: `compositor_service` uses `-stream_loop -1` to loop the animation video indefinitely, then `-shortest` trims to audio length. This ensures the full voiceover is preserved even when animations are shorter than speech. Re-encodes with `libx264 -preset ultrafast -crf 28`.
+- **Duration estimation at 90 wpm**: `_estimate_duration()` uses 90 wpm (not the typical 150 wpm) because Qwen3-TTS speaks at ~1.5 words/sec. Accurate estimates ensure the annotator writes appropriately-timed animations.
 - **Parallel scriptwriting**: `scriptwriter_service` fans out one `asyncio.create_task` per section group (e.g. Abstract, Methods, Results each get their own Claude call). Results awaited in order for progress tracking. Aggregator pass adds intro/outro/transitions.
-- **JSON parse retry**: Scriptwriter/aggregator/annotator Claude calls attempt to parse JSON from the response. On failure, retry once with prefilled assistant response (`[`). On second failure, fall back gracefully (raw segments, single fallback segment, or empty hints).
-- **Manim animation rendering**: `animation_service` uses `ProcessPoolExecutor(1)` (mirrors TTS pattern) to render Manim scenes via subprocess. Rich scene builder handles hints with `objects`/`steps` arrays directly. Legacy path dispatches by hint type: `equation`→`MathTex`+`Write`, `bullet_list`→`VGroup`+`FadeIn(lag_ratio)`, `diagram`→`Rectangle`+`Arrow`+`Create`, `highlight`→`Text`+`Indicate`, `code`→`Code`+`FadeIn`, `graph`→`Axes`+`Create`, `image_placeholder`→`Rectangle`+`Text`. 21+ free-form styles normalize to 5 Manim classes (Write, FadeIn, Create, GrowFromCenter, Indicate). Fallback on any error: plain text title card.
-- **Video compositing**: `compositor_service` uses async ffmpeg subprocesses. Per-segment mux (`-c:v copy -c:a aac -shortest`), then concat demuxer for final `data/videos/{id}/video.mp4`.
+- **JSON parse retry**: Scriptwriter/aggregator Claude calls attempt to parse JSON from the response. On failure, retry once with prefilled assistant response (`[`). On second failure, fall back gracefully (raw segments, single fallback segment).
+- **Paper deletion**: `DELETE /api/papers/{id}` removes all data across 7 directories (papers, processed, audio, scripts, animations, videos, exports). Frontend confirms with user, clears active state if the deleted paper was selected.
+- **Animation browser**: After pipeline completion or re-render, the right panel shows an animation browser with prev/next navigation to cycle through individual segment MP4s. Highlights the corresponding script card in the center panel.
+- **Hint validation (display only)**: `hint_validator` still runs for UI badge display but no longer drives rendering. Validates mobject_type, action, and color whitelists; repairs empty step targets; ensures minimum 2 hints per segment.
 - **Async background tasks**: Pipeline, LLM, and TTS processing run via `asyncio.create_task()`. Progress tracked in `task_registry` dict, streamed to frontend via SSE (0.5s polling in `sse_stream()`).
 - **TTS concurrency**: `ProcessPoolExecutor` with 1 worker (MLX needs its own process). Sync generation runs in `run_in_executor()`.
 - **Lazy model loading**: TTS model loaded on first request, not at startup. Uses `mlx_audio.tts.load_model()`.
@@ -130,17 +134,16 @@ data/                    # Runtime storage, gitignored
 - **No persistence**: Task registry is in-memory only (lost on restart). Paper/audio/script data persists on filesystem.
 - **No auth**: No authentication or rate limiting.
 - **No retry**: Failed pipeline/LLM/TTS tasks stay failed; must re-trigger manually.
-- **No cleanup**: Old data in `data/` grows indefinitely.
 - **No logging**: Uses default uvicorn logging only.
 - **Music/mix routers removed from main.py**: `music.py` and `mix.py` still exist as files but are not mounted. Pipeline export is speech-only.
 
 ## Dependencies
 
 - `fastapi` + `uvicorn` — web framework
-- `anthropic` — Claude API (async streaming)
-- `openai` — OpenAI API (fallback for scriptwriter/annotator)
+- `anthropic` — Claude API (async streaming, Opus for animation, Sonnet for scripting)
+- `openai` — OpenAI API (fallback for scriptwriter)
 - `PyMuPDF` (imported as `fitz`) — PDF text extraction
 - `mlx-audio` — on-device TTS via Apple MLX (`mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit`)
 - `pydub` — audio manipulation (requires ffmpeg system dependency)
-- `manim` — programmatic math/science animations (renders MP4 segments)
+- `manim` v0.20.0 — programmatic math/science animations (renders MP4 segments)
 - `pydantic-settings` — config from `.env`

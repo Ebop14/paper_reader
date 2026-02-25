@@ -1,112 +1,80 @@
-"""Word-anchored annotation agent.
+"""Manim code generation agent.
 
 Reads each segment's narration + original paper source text and generates
-dense, word-anchored animation hints.  Runs as a separate LLM pass after
+complete Manim construct() body code.  Runs as a separate LLM pass after
 the scriptwriter so that narration quality and visual richness are
 independently optimised.
 """
 
 import asyncio
-import json
 import re
 
 import anthropic
-import openai
 
 from app.config import settings
 from app.models import (
-    AnimationHint, AnimationStep, ManimObject,
+    AnimationHint,
     PaperMeta, PaperSection, VideoScript,
 )
 from app.tasks.processing import update_task
 
 # ---------------------------------------------------------------------------
-# Manim reference (single source of truth — only consumed here)
+# System prompt
 # ---------------------------------------------------------------------------
 
-MANIM_REFERENCE = """## Manim Animation Reference
+ANIMATOR_SYSTEM = """You are an expert Manim Community Edition animator creating educational video segments for academic papers.
 
-You MUST use ONLY the object types, actions, colors, and positions listed below. Anything else will be rejected.
+You will be given a segment's narration text, the original paper source, and a target duration. Write the BODY of a Manim Scene's `construct(self)` method. Your code will be inserted into:
 
-### Object types (mobject_type)
-| mobject_type | Required params | Optional params |
-|---|---|---|
-| Text | text (str) | font_size (int, default 32), color (str) |
-| MathTex | tex (str, raw LaTeX) | font_size (int), color (str) |
-| BulletedList | items (list[str]) | font_size (int), buff (float) |
-| Rectangle | width (float), height (float) | color (str), fill_opacity (float) |
-| RoundedRectangle | width (float), height (float), corner_radius (float) | color (str), fill_opacity (float) |
-| Circle | radius (float) | color (str), fill_opacity (float) |
-| Arrow | start (list[3 floats]), end (list[3 floats]) | color (str), stroke_width (float) |
-| Line | start (list[3 floats]), end (list[3 floats]) | color (str), stroke_width (float) |
-| Dot | point (list[3 floats]) | color (str), radius (float) |
-| Brace | target (str, name of another object), direction (str, e.g. "DOWN") | text (str) |
-| SurroundingRectangle | target (str, name of another object) | color (str), buff (float) |
-| Axes | x_range (list[3 nums]), y_range (list[3 nums]) | x_length (float), y_length (float), axis_config (dict) |
-| BarChart | values (list[float]), bar_names (list[str]) | bar_colors (list[str]), y_range (list[3 nums]) |
-| NumberLine | x_range (list[3 nums]) | length (float), include_numbers (bool) |
-| Code | code (str), language (str) | font_size (int) |
-| Table | rows (list[list[str]]) | col_labels (list[str]), row_labels (list[str]) |
-| VGroup | children (list[str], names of other objects) | — |
+```python
+from manim import *
 
-### Actions (action)
-| action | What it does | params |
-|---|---|---|
-| create | Draw shapes (Create animation) | run_time (float) |
-| write | Write text/math (Write animation) | run_time (float) |
-| fade_in | Fade in | run_time (float), shift (str, e.g. "DOWN") |
-| fade_out | Fade out | run_time (float) |
-| indicate | Pulse/highlight (Indicate) | scale_factor (float), color (str) |
-| transform | Morph one object to another | target (str, name of destination object), run_time (float) |
-| move_to | Move object to position | position (str or list[3 floats]), run_time (float) |
-| scale | Scale object | scale_factor (float), run_time (float) |
-| change_color | Animate color change | color (str), run_time (float) |
-| wait | Pause | — |
-| grow_arrow | Grow an arrow (GrowArrow) | run_time (float) |
-| add_plot | Add plot line to Axes | function (str, e.g. "lambda x: x**2"), color (str), x_range (list[2 floats]) |
+class SegmentScene(Scene):
+    def construct(self):
+        # YOUR CODE HERE
+```
 
-### Colors
-WHITE, GREY, RED, BLUE, GREEN, YELLOW, ORANGE, PURPLE, TEAL, PINK, GOLD, MAROON
+## Hard rules
+- Write ONLY the method body, indented with 8 spaces (you are inside `def construct(self):`)
+- Output ONLY Python code. No markdown fences, no commentary, no explanation.
+- Your total animation run_time + wait time should approximately fill DURATION seconds.
+- Always clear objects before introducing new ones — don't let the screen get cluttered.
+- End the scene by fading out any remaining objects.
+- Wrap ALL MathTex/Tex in try/except with a Text fallback — LaTeX compilation can fail:
+    ```
+        try:
+            eq = MathTex(r"E = mc^2")
+        except Exception:
+            eq = Text("E = mc²", font_size=28)
+    ```
+- Keep all text short. The narration carries the detail — visuals should be diagrams, equations, charts, and structural layouts.
+- Do NOT use external files, images, SVGs, or network resources.
+- Do NOT use `self.camera` or `self.renderer` — just standard Scene methods.
+- Do NOT define new classes or functions — write straight-line construct() code.
 
-### Positioning
-- "ORIGIN", "to_edge(UP)", "to_edge(DOWN)", "to_edge(LEFT)", "to_edge(RIGHT)"
-- "to_corner(UL)", "to_corner(UR)", "to_corner(DL)", "to_corner(DR)"
-- "[x, y, 0]" for explicit coordinates (x: -6 to 6, y: -3.5 to 3.5)
+## Available API
 
-### Layout strategies
-- **Progressive build**: Start with a title, add elements one by one
-- **Side-by-side comparison**: Left vs right with arrows or labels
-- **Hierarchical**: Top-level concept at top, details below
-- **Before/after**: Show old approach, transform to new approach"""
+**Objects**: Text, MathTex, Tex, MarkupText, BulletedList, Paragraph, Rectangle, RoundedRectangle, Square, Circle, Ellipse, Arc, Annulus, Sector, AnnularSector, Arrow, CurvedArrow, CurvedDoubleArrow, DoubleArrow, Line, DashedLine, Dot, Star, Triangle, Polygon, RegularPolygon, Brace, BraceLabel, SurroundingRectangle, BackgroundRectangle, Underline, Cross, Cutout, Axes, NumberPlane, ComplexPlane, PolarPlane, BarChart, NumberLine, Code, Table, MathTable, Matrix, DecimalMatrix, IntegerMatrix, VGroup, DecimalNumber, Integer, ValueTracker, always_redraw, TracedPath
 
-ANNOTATOR_SYSTEM = f"""You are a visual annotation agent for academic paper explainer videos. You read narration text and the original paper source, then produce dense, word-anchored Manim animation hints.
+**Animations**: Write, FadeIn, FadeOut, Create, Uncreate, DrawBorderThenFill, GrowFromCenter, GrowFromEdge, GrowFromPoint, GrowArrow, SpinInFromNothing, Indicate, Flash, Circumscribe, ShowPassingFlash, Wiggle, FocusOn, Transform, ReplacementTransform, TransformFromCopy, FadeTransform, ClockwiseTransform, CounterclockwiseTransform, ShrinkToCenter, MoveToTarget, MoveAlongPath, Rotate, ApplyWave, ShowIncreasingSubsets, ShowSubmobjectsOneByOne, AnimationGroup, Succession, LaggedStart, LaggedStartMap, AddTextLetterByLetter
 
-{MANIM_REFERENCE}
+**Colors**: WHITE, GRAY, GREY, RED, RED_A, RED_B, RED_C, RED_D, RED_E, BLUE, BLUE_A, BLUE_B, BLUE_C, BLUE_D, BLUE_E, GREEN, GREEN_A, GREEN_B, GREEN_C, GREEN_D, GREEN_E, YELLOW, YELLOW_A, YELLOW_B, YELLOW_C, YELLOW_D, YELLOW_E, ORANGE, PURPLE, TEAL, TEAL_A, TEAL_B, TEAL_C, TEAL_D, TEAL_E, PINK, GOLD, GOLD_A, GOLD_B, GOLD_C, GOLD_D, GOLD_E, MAROON, MAROON_A, MAROON_B, BLACK
 
-### Your task
-Given:
-- **narration_text**: the voiceover for this segment
-- **section_title**: which section of the paper this covers
-- **paper_source_text**: the original paper text for context (equations, data, method names)
+**Positioning**: ORIGIN, UP, DOWN, LEFT, RIGHT, UL, UR, DL, DR
+  .to_edge(UP), .to_corner(UL), .next_to(other, DOWN), .move_to([x, y, 0]), .shift(LEFT * 2)
+  Coordinate range: x ∈ [-7, 7], y ∈ [-4, 4]
 
-Produce 4-8 animation hints. Each hint MUST include:
-- **anchor_text**: a VERBATIM quoted phrase from narration_text (3-8 words). The animation will appear exactly when these words are spoken.
-- **type**: one of "equation", "diagram", "bullet_list", "highlight", "code", "graph", "image_placeholder"
-- **description**: what this hint shows
-- **content**: raw content (LaTeX, bullet text, etc.) — can be empty
-- **objects**: array of Manim objects with full params
-- **steps**: array of animation steps with full params
-- **persistent**: true if objects should stay on screen for the next hint (e.g. axes that get plots added)
+**Formatting**: .scale(), .set_color(), .arrange(DOWN), .set_opacity(), .set_stroke(), .set_fill()
 
-Rules:
-- anchor_text must be an EXACT substring of narration_text (case-sensitive)
-- Use REAL DATA from the paper source: actual equations, numbers, method names, results
-- Each hint should create a meaningful visual — not just a title card
-- Hints should progress logically: build up, compare, highlight, conclude
-- Space hints across the full narration — don't cluster them all at the start
-- Use persistent: true when building up complex diagrams across multiple hints
-
-Output ONLY a JSON array of hint objects. No markdown fences, no commentary."""
+## Style guide
+- Use progressive reveal: build up complexity step by step
+- Use color meaningfully: highlight key concepts, color-code comparisons
+- Use spatial layout: comparisons side-by-side, hierarchies top-to-bottom, flow diagrams left-to-right
+- Add self.wait(1) pauses after key moments to let viewers absorb
+- Use REAL DATA from the paper: actual equations, actual numbers, actual method names, actual results
+- Create rich visuals — diagrams, flow charts, annotated equations, data visualizations — NOT just text cards
+- Group related animations with VGroup for clean transitions
+- Use LaggedStart for lists and sequential reveals"""
 
 
 # ---------------------------------------------------------------------------
@@ -117,147 +85,60 @@ def _get_client() -> anthropic.AsyncAnthropic:
     return anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 
-def _get_openai_client() -> openai.AsyncOpenAI:
-    return openai.AsyncOpenAI(api_key=settings.openai_api_key)
-
-
-def _parse_json_response(text: str) -> list[dict] | None:
-    """Try to extract a JSON array from the response."""
+def _extract_code(text: str) -> str:
+    """Extract Python code from the response, stripping markdown fences if present."""
     text = text.strip()
-    text = re.sub(r'^```(?:json)?\s*', '', text)
-    text = re.sub(r'\s*```$', '', text)
-    text = text.strip()
-    try:
-        result = json.loads(text)
-        if isinstance(result, list):
-            return result
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r'\[.*\]', text, re.DOTALL)
+    # Strip markdown code fences
+    match = re.search(r'```(?:python)?\s*\n(.*?)```', text, re.DOTALL)
     if match:
-        try:
-            result = json.loads(match.group())
-            if isinstance(result, list):
-                return result
-        except json.JSONDecodeError:
-            pass
-    return None
+        return match.group(1).strip()
+    # Strip leading/trailing ``` without language tag
+    text = re.sub(r'^```\s*', '', text)
+    text = re.sub(r'\s*```$', '', text)
+    return text.strip()
 
 
-def _parse_hint(h: dict) -> AnimationHint:
-    """Parse a hint dict into an AnimationHint, handling both legacy and rich formats."""
-    objects = []
-    for obj in h.get("objects", []):
-        objects.append(ManimObject(
-            name=obj.get("name", "obj"),
-            mobject_type=obj.get("mobject_type", "Text"),
-            params=obj.get("params", {}),
-            position=obj.get("position", ""),
-        ))
-
-    steps = []
-    for step in h.get("steps", []):
-        steps.append(AnimationStep(
-            action=step.get("action", "fade_in"),
-            target=step.get("target", ""),
-            params=step.get("params", {}),
-            duration=step.get("duration", 1.0),
-        ))
-
-    return AnimationHint(
-        type=h.get("type", ""),
-        description=h.get("description", ""),
-        content=h.get("content", ""),
-        style=h.get("style", ""),
-        anchor_text=h.get("anchor_text", ""),
-        objects=objects,
-        steps=steps,
-        persistent=h.get("persistent", False),
-        start_fraction=h.get("start_fraction", 0.0),
-        end_fraction=h.get("end_fraction", 1.0),
+def _make_title_card_code(section_title: str, duration: float) -> str:
+    """Fallback: simple title card code."""
+    safe = section_title.replace("\\", "\\\\").replace('"', '\\"')
+    wait = max(duration - 2.0, 0.5)
+    return (
+        f'        title = Text("{safe}", font_size=36)\n'
+        f'        self.play(FadeIn(title), run_time=1.0)\n'
+        f'        self.wait({wait:.1f})\n'
+        f'        self.play(FadeOut(title), run_time=1.0)'
     )
 
 
 # ---------------------------------------------------------------------------
-# Anchor text → timing fraction computation
+# LLM call
 # ---------------------------------------------------------------------------
 
-def _compute_fractions_from_anchor(
-    narration_text: str, hints: list[AnimationHint],
-) -> list[AnimationHint]:
-    """Compute start_fraction/end_fraction from each hint's anchor_text position."""
-    words = narration_text.split()
-    total_words = len(words)
-    if total_words == 0:
-        # Even spacing fallback
-        for i, hint in enumerate(hints):
-            n = len(hints)
-            hint.start_fraction = round(i / n, 3)
-            hint.end_fraction = round((i + 1) / n, 3)
-        return hints
-
-    narration_lower = narration_text.lower()
-
-    for i, hint in enumerate(hints):
-        anchor = hint.anchor_text.strip()
-        if not anchor:
-            # No anchor — fall back to even spacing
-            n = len(hints)
-            hint.start_fraction = round(i / n, 3)
-            hint.end_fraction = round((i + 1) / n, 3)
-            continue
-
-        # Find anchor in narration (case-insensitive char position, then map to word index)
-        anchor_lower = anchor.lower()
-        char_pos = narration_lower.find(anchor_lower)
-        if char_pos == -1:
-            # Anchor not found — even spacing fallback
-            n = len(hints)
-            hint.start_fraction = round(i / n, 3)
-            hint.end_fraction = round((i + 1) / n, 3)
-            continue
-
-        # Count words before char_pos to get start word index
-        prefix = narration_text[:char_pos]
-        start_word_idx = len(prefix.split()) - (1 if prefix and not prefix.endswith(' ') else 0)
-        start_word_idx = max(0, start_word_idx)
-
-        anchor_word_count = len(anchor.split())
-        end_word_idx = min(start_word_idx + anchor_word_count, total_words)
-
-        hint.start_fraction = round(start_word_idx / total_words, 3)
-        hint.end_fraction = round(end_word_idx / total_words, 3)
-
-        # Ensure end > start
-        if hint.end_fraction <= hint.start_fraction:
-            hint.end_fraction = min(hint.start_fraction + 0.1, 1.0)
-
-    return hints
-
-
-# ---------------------------------------------------------------------------
-# LLM calls
-# ---------------------------------------------------------------------------
-
-async def _call_annotator_claude(
-    narration_text: str, section_title: str, paper_source_text: str,
-) -> list[dict] | None:
-    """Call Claude to generate annotation hints for one segment."""
+async def _generate_manim_code(
+    narration_text: str,
+    section_title: str,
+    paper_source_text: str,
+    duration: float,
+) -> str:
+    """Call Claude to generate Manim construct() body for one segment."""
     client = _get_client()
 
     content = (
-        f"## Section: {section_title}\n\n"
-        f"### Narration text\n{narration_text}\n\n"
-        f"### Paper source text\n{paper_source_text}\n"
+        f"## Section: {section_title}\n"
+        f"## DURATION: {duration:.0f} seconds\n\n"
+        f"### Narration text (what the audience hears during this animation)\n"
+        f"{narration_text}\n\n"
+        f"### Paper source text (use real data from here)\n"
+        f"{paper_source_text[:6000]}\n"
     )
 
     result = ""
     async with client.messages.stream(
-        model="claude-sonnet-4-20250514",
+        model="claude-opus-4-20250514",
         max_tokens=8192,
         system=[{
             "type": "text",
-            "text": ANNOTATOR_SYSTEM,
+            "text": ANIMATOR_SYSTEM,
             "cache_control": {"type": "ephemeral"},
         }],
         messages=[{"role": "user", "content": content}],
@@ -265,93 +146,15 @@ async def _call_annotator_claude(
         async for chunk in stream.text_stream:
             result += chunk
 
-    parsed = _parse_json_response(result)
-    if parsed is not None:
-        return parsed
+    code = _extract_code(result)
+    if not code:
+        return _make_title_card_code(section_title, duration)
 
-    # Retry once with prefilled assistant response
-    result = ""
-    async with client.messages.stream(
-        model="claude-sonnet-4-20250514",
-        max_tokens=8192,
-        system=[{
-            "type": "text",
-            "text": ANNOTATOR_SYSTEM,
-            "cache_control": {"type": "ephemeral"},
-        }],
-        messages=[
-            {"role": "user", "content": content},
-            {"role": "assistant", "content": "[\n"},
-        ],
-    ) as stream:
-        async for chunk in stream.text_stream:
-            result += chunk
+    # Basic validation: must contain self.play or self.wait
+    if "self.play" not in code and "self.wait" not in code and "self.add" not in code:
+        return _make_title_card_code(section_title, duration)
 
-    return _parse_json_response("[" + result)
-
-
-async def _call_annotator_openai(
-    narration_text: str, section_title: str, paper_source_text: str,
-) -> list[dict] | None:
-    """Call OpenAI as fallback annotator."""
-    client = _get_openai_client()
-
-    content = (
-        f"## Section: {section_title}\n\n"
-        f"### Narration text\n{narration_text}\n\n"
-        f"### Paper source text\n{paper_source_text}\n"
-    )
-
-    response = await client.chat.completions.create(
-        model="gpt-4o",
-        max_tokens=8192,
-        messages=[
-            {"role": "system", "content": ANNOTATOR_SYSTEM},
-            {"role": "user", "content": content},
-        ],
-    )
-
-    result = response.choices[0].message.content or ""
-    parsed = _parse_json_response(result)
-    if parsed is not None:
-        return parsed
-
-    # Retry once
-    response = await client.chat.completions.create(
-        model="gpt-4o",
-        max_tokens=8192,
-        messages=[
-            {"role": "system", "content": ANNOTATOR_SYSTEM},
-            {"role": "user", "content": content},
-            {"role": "assistant", "content": "["},
-        ],
-    )
-
-    result = "[" + (response.choices[0].message.content or "")
-    return _parse_json_response(result)
-
-
-async def _call_annotator(
-    narration_text: str, section_title: str, paper_source_text: str,
-) -> list[dict]:
-    """Call Claude, falling back to OpenAI on error."""
-    try:
-        result = await _call_annotator_claude(narration_text, section_title, paper_source_text)
-        if result is not None:
-            return result
-    except Exception:
-        pass
-
-    if settings.openai_api_key:
-        try:
-            result = await _call_annotator_openai(narration_text, section_title, paper_source_text)
-            if result is not None:
-                return result
-        except Exception:
-            pass
-
-    # Final fallback: empty hints (validator will add title cards)
-    return []
+    return code
 
 
 # ---------------------------------------------------------------------------
@@ -359,13 +162,28 @@ async def _call_annotator(
 # ---------------------------------------------------------------------------
 
 async def annotate_segment(
-    narration_text: str, section_title: str, paper_source_text: str,
-) -> list[AnimationHint]:
-    """Generate word-anchored animation hints for a single segment."""
-    raw_hints = await _call_annotator(narration_text, section_title, paper_source_text)
-    hints = [_parse_hint(h) for h in raw_hints]
-    hints = _compute_fractions_from_anchor(narration_text, hints)
-    return hints
+    narration_text: str,
+    section_title: str,
+    paper_source_text: str,
+    duration: float = 20.0,
+) -> tuple[str, list[AnimationHint]]:
+    """Generate Manim code and minimal display hints for a single segment.
+
+    Returns:
+        (manim_code, animation_hints) where manim_code is the construct() body
+        and animation_hints is a minimal list for UI display.
+    """
+    code = await _generate_manim_code(
+        narration_text, section_title, paper_source_text, duration,
+    )
+
+    # Create a minimal hint for UI badge display
+    hints = [AnimationHint(
+        type="animation",
+        description=f"Manim scene ({len(code.splitlines())} lines)",
+    )]
+
+    return code, hints
 
 
 async def annotate_script(
@@ -374,16 +192,16 @@ async def annotate_script(
     chunk_groups: list[tuple[str, list[PaperSection]]],
     task_id: str,
 ) -> VideoScript:
-    """Annotate all segments in a script with word-anchored animation hints.
+    """Annotate all segments with Manim code.
 
     Args:
-        script: VideoScript with narration-only segments (empty animation_hints).
+        script: VideoScript with narration-only segments.
         meta: Paper metadata with sections for source text lookup.
         chunk_groups: Section groups from director (reused from Phase 1).
         task_id: For progress reporting.
 
     Returns:
-        The same VideoScript with animation_hints filled in.
+        The same VideoScript with manim_code and animation_hints filled in.
     """
     # Build a lookup: section_title -> combined paper source text
     source_by_title: dict[str, str] = {}
@@ -395,6 +213,9 @@ async def annotate_script(
     for i, segment in enumerate(script.segments):
         if i > 0:
             await asyncio.sleep(0.5)  # Stagger to avoid rate limits
+
+        # Estimated duration for timing guidance
+        duration = segment.estimated_duration_seconds or 20.0
 
         # Find the best matching source text for this segment
         paper_source = source_by_title.get(segment.section_title, "")
@@ -411,17 +232,19 @@ async def annotate_script(
                 s.text for s in meta.sections
             )[:4000]
 
-        hints = await annotate_segment(
+        code, hints = await annotate_segment(
             segment.narration_text,
             segment.section_title,
             paper_source,
+            duration,
         )
+        segment.manim_code = code
         segment.animation_hints = hints
 
         update_task(
             task_id,
             stage_progress=(i + 1) / total,
-            message=f"Annotating segment {i + 1}/{total}",
+            message=f"Animating segment {i + 1}/{total}",
         )
 
     return script

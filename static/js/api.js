@@ -17,6 +17,12 @@ const API = {
         return res.json();
     },
 
+    async deletePaper(id) {
+        const res = await fetch(`/api/papers/${id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(await res.text());
+        return res.json();
+    },
+
     // --- Pipeline ---
 
     async startPipeline(paperId, voice, speed) {

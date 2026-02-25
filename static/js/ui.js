@@ -1,17 +1,26 @@
 const UI = {
     $(id) { return document.getElementById(id); },
 
-    renderPaperList(papers, activePaperId, onSelect) {
+    renderPaperList(papers, activePaperId, onSelect, onDelete) {
         const ul = this.$('paper-list');
         ul.innerHTML = '';
         for (const p of papers) {
             const li = document.createElement('li');
             li.className = p.id === activePaperId ? 'active' : '';
             li.innerHTML = `
-                <span class="paper-name">${this.escHtml(p.filename)}</span>
-                <span class="paper-meta">${p.num_pages} pages &middot; ${(p.total_chars / 1000).toFixed(1)}k chars</span>
+                <div class="paper-row">
+                    <div class="paper-info">
+                        <span class="paper-name">${this.escHtml(p.filename)}</span>
+                        <span class="paper-meta">${p.num_pages} pages &middot; ${(p.total_chars / 1000).toFixed(1)}k chars</span>
+                    </div>
+                    <button class="btn-delete" title="Delete paper">&times;</button>
+                </div>
             `;
-            li.onclick = () => onSelect(p);
+            li.querySelector('.paper-info').onclick = () => onSelect(p);
+            li.querySelector('.btn-delete').onclick = (e) => {
+                e.stopPropagation();
+                if (onDelete) onDelete(p);
+            };
             ul.appendChild(li);
         }
     },
@@ -166,6 +175,21 @@ const UI = {
         section.style.display = 'none';
         this.$('video-player').src = '';
         this.$('btn-export-video').style.display = 'none';
+    },
+
+    showAnimationBrowser(url, current, total, segmentTitle) {
+        const section = this.$('animation-browser');
+        const video = this.$('animation-player');
+        section.style.display = 'block';
+        video.src = url;
+        this.$('anim-current').textContent = current;
+        this.$('anim-total').textContent = total;
+        this.$('anim-segment-title').textContent = segmentTitle || '';
+    },
+
+    hideAnimationBrowser() {
+        this.$('animation-browser').style.display = 'none';
+        this.$('animation-player').src = '';
     },
 
     updatePlayButton(playing) {

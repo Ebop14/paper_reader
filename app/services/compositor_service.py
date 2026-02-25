@@ -24,14 +24,23 @@ async def _combine_segment(
     audio_path: Path,
     output_path: Path,
 ) -> None:
-    """Mux one video + one audio into a single MP4."""
+    """Mux one video + one audio into a single MP4.
+
+    Loops the video if it's shorter than the audio so no speech is cut off.
+    Re-encodes video (ultrafast preset) to support the loop + trim.
+    """
     await _run_ffmpeg([
         "-y",
+        "-stream_loop", "-1",       # loop video indefinitely
         "-i", str(video_path),
         "-i", str(audio_path),
-        "-c:v", "copy",
+        "-map", "0:v", "-map", "1:a",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "28",
+        "-pix_fmt", "yuv420p",
         "-c:a", "aac",
-        "-shortest",
+        "-shortest",                 # trim to audio length (video loops past it)
         str(output_path),
     ])
 

@@ -152,6 +152,21 @@ main {
 .paper-list li:hover { background: var(--surface); }
 .paper-list li.active { background: var(--accent-dim); }
 
+.paper-list .paper-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.paper-list .paper-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    cursor: pointer;
+}
+
 .paper-list .paper-name {
     white-space: nowrap;
     overflow: hidden;
@@ -162,6 +177,23 @@ main {
     font-size: 0.75rem;
     color: var(--text-dim);
 }
+
+.paper-list .btn-delete {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 1.1rem;
+    cursor: pointer;
+    padding: 0.15rem 0.35rem;
+    border-radius: 4px;
+    line-height: 1;
+    opacity: 0;
+    transition: opacity 0.15s, color 0.15s, background 0.15s;
+}
+
+.paper-list li:hover .btn-delete { opacity: 1; }
+.paper-list .btn-delete:hover { color: var(--error); background: rgba(239, 83, 80, 0.15); }
 
 /* Text content */
 .panel-header {
@@ -546,6 +578,35 @@ input[type="range"]::-webkit-slider-thumb {
     border-radius: var(--radius);
     background: #000;
     margin-top: 0.5rem;
+}
+
+/* Animation Browser */
+#animation-browser {
+    margin-bottom: 1rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.animation-nav {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    margin-top: 0.5rem;
+}
+
+.animation-indicator {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+}
+
+.anim-segment-title {
+    text-align: center;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    margin-top: 0.4rem;
 }
 
 #video-player-section {

@@ -28,6 +28,7 @@ async def generate_animations(
             hints=segment.animation_hints,
             section_title=segment.section_title,
             duration=duration,
+            manim_code=segment.manim_code,
         )
 
         segment.animation_file = mp4_path.name

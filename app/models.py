@@ -87,6 +87,7 @@ class ScriptSegment(BaseModel):
     narration_text: str
     speaker_notes: str = ""
     animation_hints: list[AnimationHint] = Field(default_factory=list)
+    manim_code: str = ""  # Raw Manim construct() body written by LLM
     estimated_duration_seconds: float = 0.0
     actual_duration_seconds: float | None = None
     audio_file: str | None = None

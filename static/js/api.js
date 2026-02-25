@@ -71,6 +71,29 @@ const API = {
         return `/api/tts/${paperId}/${filename}`;
     },
 
+    // --- Animations ---
+
+    async listAnimations(paperId) {
+        const res = await fetch(`/api/pipeline/${paperId}/animations`);
+        return res.json();
+    },
+
+    animationURL(paperId, filename) {
+        return `/api/pipeline/${paperId}/animations/${filename}`;
+    },
+
+    videoURL(paperId) {
+        return `/api/pipeline/${paperId}/video`;
+    },
+
+    async exportVideo(paperId) {
+        const res = await fetch(`/api/pipeline/${paperId}/export-video`, {
+            method: 'POST',
+        });
+        if (!res.ok) throw new Error(await res.text());
+        return res.blob();
+    },
+
     // --- Export ---
 
     async exportVoiceover(paperId) {

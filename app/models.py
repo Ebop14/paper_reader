@@ -68,6 +68,7 @@ class ScriptSegment(BaseModel):
     estimated_duration_seconds: float = 0.0
     actual_duration_seconds: float | None = None
     audio_file: str | None = None
+    animation_file: str | None = None
 
 
 class VideoScript(BaseModel):
@@ -79,6 +80,7 @@ class VideoScript(BaseModel):
     actual_total_duration_seconds: float | None = None
     segments: list[ScriptSegment] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)
+    video_file: str | None = None
 
 
 class PipelineRequest(BaseModel):

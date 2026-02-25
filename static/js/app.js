@@ -48,6 +48,7 @@ const App = {
 
         // Export
         UI.$('btn-export').onclick = () => this.exportVoiceover();
+        UI.$('btn-export-video').onclick = () => this.exportVideo();
 
         // Speech ended -> next chunk
         this.mixer.onSpeechEnded(() => this.nextChunk());
@@ -103,6 +104,13 @@ const App = {
         } else {
             UI.setPlayerVisible(false);
         }
+
+        // Check for existing video
+        if (script && script.video_file) {
+            UI.showVideoPlayer(API.videoURL(paper.id));
+        } else {
+            UI.hideVideoPlayer();
+        }
     },
 
     // --- Pipeline ---
@@ -141,6 +149,10 @@ const App = {
                 if (script) {
                     this.state.script = script;
                     UI.renderScript(script, -1);
+                    // Show video player if video was generated
+                    if (script.video_file) {
+                        UI.showVideoPlayer(API.videoURL(paper.id));
+                    }
                 }
                 this.refreshChunks();
             } else if (data.status === 'failed') {
@@ -241,6 +253,29 @@ const App = {
 
         UI.$('btn-export').disabled = false;
         UI.$('btn-export').textContent = 'Download Voiceover';
+    },
+    // --- Video Export ---
+    async exportVideo() {
+        const paper = this.state.activePaper;
+        if (!paper) return;
+
+        UI.$('btn-export-video').disabled = true;
+        UI.$('btn-export-video').textContent = 'Exporting...';
+
+        try {
+            const blob = await API.exportVideo(paper.id);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${paper.filename.replace('.pdf', '')}_video.mp4`;
+            a.click();
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            alert('Video export failed: ' + e.message);
+        }
+
+        UI.$('btn-export-video').disabled = false;
+        UI.$('btn-export-video').textContent = 'Download Video';
     },
 };
 

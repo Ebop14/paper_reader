@@ -4,6 +4,8 @@ from app.models import PaperMeta, PaperSection, VideoScript
 from app.storage import papers_dir, scripts_dir
 from app.services.scriptwriter_service import write_script
 from app.services.voiceover_service import generate_voiceover
+from app.services.animation_orchestrator import generate_animations
+from app.services.compositor_service import composite_video
 from app.tasks.processing import update_task
 
 
@@ -63,6 +65,27 @@ async def run_pipeline(
             message="Starting voiceover generation...",
         )
         script = await generate_voiceover(paper_id, script, voice, speed, task_id)
+        _save_script(paper_id, script)
+
+        # Phase 4: Animation rendering
+        update_task(
+            task_id,
+            stage="animation",
+            stage_progress=0.0,
+            message="Starting animation rendering...",
+        )
+        script = await generate_animations(paper_id, script, task_id)
+        _save_script(paper_id, script)
+
+        # Phase 5: Compositing
+        update_task(
+            task_id,
+            stage="compositing",
+            stage_progress=0.0,
+            message="Starting video compositing...",
+        )
+        final_video = await composite_video(paper_id, script, task_id)
+        script.video_file = final_video.name
         _save_script(paper_id, script)
 
         # Done

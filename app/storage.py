@@ -29,3 +29,11 @@ def exports_dir() -> Path:
 
 def scripts_dir() -> Path:
     return _ensure(settings.data_dir / "scripts")
+
+
+def animations_dir() -> Path:
+    return _ensure(settings.data_dir / "animations")
+
+
+def videos_dir() -> Path:
+    return _ensure(settings.data_dir / "videos")

@@ -5,14 +5,14 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.models import PipelineRequest
-from app.storage import scripts_dir, audio_dir, exports_dir
+from app.storage import scripts_dir, audio_dir, exports_dir, animations_dir, videos_dir
 from app.services.director_service import run_pipeline
 from app.services.audio_service import concat_speech_chunks
 from app.tasks.processing import task_registry, create_task, sse_stream
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
-PIPELINE_STAGES = ["loading", "scripting", "voiceover", "done"]
+PIPELINE_STAGES = ["loading", "scripting", "voiceover", "animation", "compositing", "done"]
 
 
 @router.post("/{paper_id}/start")
@@ -76,4 +76,41 @@ async def export_voiceover(paper_id: str):
         str(out_path),
         media_type="audio/mpeg",
         filename=f"{paper_id}_voiceover.mp3",
+    )
+
+
+@router.get("/{paper_id}/animations")
+async def list_animations(paper_id: str):
+    anim_dir = animations_dir() / paper_id
+    if not anim_dir.exists():
+        return []
+    files = sorted(anim_dir.glob("segment_*.mp4"))
+    return [{"index": i, "filename": f.name} for i, f in enumerate(files)]
+
+
+@router.get("/{paper_id}/animations/{filename}")
+async def serve_animation(paper_id: str, filename: str):
+    path = animations_dir() / paper_id / filename
+    if not path.exists():
+        raise HTTPException(404, "Animation file not found")
+    return FileResponse(str(path), media_type="video/mp4")
+
+
+@router.get("/{paper_id}/video")
+async def serve_video(paper_id: str):
+    path = videos_dir() / paper_id / "video.mp4"
+    if not path.exists():
+        raise HTTPException(404, "Video not found")
+    return FileResponse(str(path), media_type="video/mp4")
+
+
+@router.post("/{paper_id}/export-video")
+async def export_video(paper_id: str):
+    path = videos_dir() / paper_id / "video.mp4"
+    if not path.exists():
+        raise HTTPException(404, "Video not found")
+    return FileResponse(
+        str(path),
+        media_type="video/mp4",
+        filename=f"{paper_id}_video.mp4",
     )

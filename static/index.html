@@ -71,6 +71,16 @@
                     <span>Voiceover</span>
                 </div>
                 <div class="stage-connector"></div>
+                <div class="stage" data-stage="animation">
+                    <div class="stage-dot"></div>
+                    <span>Animation</span>
+                </div>
+                <div class="stage-connector"></div>
+                <div class="stage" data-stage="compositing">
+                    <div class="stage-dot"></div>
+                    <span>Compositing</span>
+                </div>
+                <div class="stage-connector"></div>
                 <div class="stage" data-stage="done">
                     <div class="stage-dot"></div>
                     <span>Done</span>
@@ -109,9 +119,16 @@
                 </div>
             </div>
 
+            <!-- Video Player -->
+            <div id="video-player-section" style="display:none">
+                <h3>Video</h3>
+                <video id="video-player" controls class="video-player"></video>
+            </div>
+
             <!-- Export -->
             <div class="export-section" id="export-section" style="display:none">
                 <button class="btn btn-secondary" id="btn-export">Download Voiceover</button>
+                <button class="btn btn-secondary" id="btn-export-video" style="display:none; margin-top:0.5rem">Download Video</button>
             </div>
         </section>
     </main>

@@ -78,7 +78,7 @@ const UI = {
     renderPipelineStages(currentStage, status) {
         const container = this.$('pipeline-stages');
         container.style.display = 'flex';
-        const stages = ['loading', 'scripting', 'voiceover', 'done'];
+        const stages = ['loading', 'scripting', 'voiceover', 'animation', 'compositing', 'done'];
         const currentIdx = stages.indexOf(currentStage);
 
         stages.forEach((stage, i) => {
@@ -151,6 +151,21 @@ const UI = {
     setPlayerVisible(show) {
         this.$('player').style.display = show ? 'block' : 'none';
         this.$('export-section').style.display = show ? 'block' : 'none';
+    },
+
+    showVideoPlayer(url) {
+        const section = this.$('video-player-section');
+        const video = this.$('video-player');
+        section.style.display = 'block';
+        video.src = url;
+        this.$('btn-export-video').style.display = 'block';
+    },
+
+    hideVideoPlayer() {
+        const section = this.$('video-player-section');
+        section.style.display = 'none';
+        this.$('video-player').src = '';
+        this.$('btn-export-video').style.display = 'none';
     },
 
     updatePlayButton(playing) {

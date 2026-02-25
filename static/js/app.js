@@ -32,6 +32,7 @@ const App = {
 
         // Pipeline
         UI.$('btn-generate').onclick = () => this.runPipeline();
+        UI.$('btn-render').onclick = () => this.runRender();
 
         // Speed display
         UI.$('tts-speed').oninput = (e) => {
@@ -92,6 +93,9 @@ const App = {
             this.state.script = script;
             UI.renderScript(script, -1);
             UI.renderPipelineStages('done', 'completed');
+            UI.$('btn-render').style.display = '';
+        } else {
+            UI.$('btn-render').style.display = 'none';
         }
 
         // Check for existing audio
@@ -144,6 +148,7 @@ const App = {
 
             if (data.status === 'completed') {
                 UI.$('btn-generate').disabled = false;
+                UI.$('btn-render').style.display = '';
                 // Reload final script with actual durations
                 const script = await API.getScript(paper.id);
                 if (script) {
@@ -158,6 +163,37 @@ const App = {
             } else if (data.status === 'failed') {
                 UI.$('btn-generate').disabled = false;
                 alert('Pipeline failed: ' + data.message);
+            }
+        });
+    },
+
+    async runRender() {
+        const paper = this.state.activePaper;
+        if (!paper) return;
+
+        UI.$('btn-render').disabled = true;
+        UI.$('btn-generate').disabled = true;
+
+        await API.startRender(paper.id);
+
+        API.streamRender(paper.id, async (data) => {
+            UI.showPipelineProgress(data);
+
+            if (data.status === 'completed') {
+                UI.$('btn-render').disabled = false;
+                UI.$('btn-generate').disabled = false;
+                const script = await API.getScript(paper.id);
+                if (script) {
+                    this.state.script = script;
+                    UI.renderScript(script, -1);
+                    if (script.video_file) {
+                        UI.showVideoPlayer(API.videoURL(paper.id));
+                    }
+                }
+            } else if (data.status === 'failed') {
+                UI.$('btn-render').disabled = false;
+                UI.$('btn-generate').disabled = false;
+                alert('Render failed: ' + data.message);
             }
         });
     },

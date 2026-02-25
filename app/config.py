@@ -4,6 +4,7 @@ from pathlib import Path
 
 class Settings(BaseSettings):
     anthropic_api_key: str = ""
+    openai_api_key: str = ""
     tts_model: str = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"
     tts_workers: int = 1
     musicgen_model: str = "facebook/musicgen-small"

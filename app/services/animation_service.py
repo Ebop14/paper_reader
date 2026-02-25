@@ -19,7 +19,7 @@ def _get_executor() -> ProcessPoolExecutor:
     return _executor
 
 
-# --- Style normalization ---
+# --- Style normalization (legacy) ---
 
 _STYLE_MAP = {
     # Write-like
@@ -113,11 +113,18 @@ def _render_segment_sync(
     return output_path
 
 
+# --- Routing: rich vs legacy ---
+
+def _has_rich_hints(hints: list[dict]) -> bool:
+    """Check if any hint has objects/steps (rich format)."""
+    return any(
+        hint.get("objects") or hint.get("steps")
+        for hint in hints
+    )
+
+
 def _build_scene_code(hints: list[dict], section_title: str, duration: float) -> str:
     """Generate a Manim Python scene file from animation hints."""
-    num_hints = max(len(hints), 1)
-    time_per_hint = duration / num_hints
-
     lines = [
         "from manim import *",
         "",
@@ -126,19 +133,392 @@ def _build_scene_code(hints: list[dict], section_title: str, duration: float) ->
     ]
 
     if not hints:
-        # Title card fallback
         lines += _title_card_lines(section_title, duration)
+    elif _has_rich_hints(hints):
+        try:
+            rich_lines = _build_rich_scene(hints, section_title, duration)
+            lines += rich_lines
+        except Exception:
+            # Fall back to legacy rendering
+            lines += _build_legacy_scene(hints, section_title, duration)
     else:
-        for i, hint in enumerate(hints):
-            try:
-                hint_lines = _hint_to_manim(hint, time_per_hint, i, num_hints)
-                lines += hint_lines
-            except Exception:
-                # Fallback: simple text card for this hint
-                lines += _fallback_hint_lines(hint, time_per_hint)
+        lines += _build_legacy_scene(hints, section_title, duration)
 
     return "\n".join(lines)
 
+
+def _build_legacy_scene(hints: list[dict], section_title: str, duration: float) -> list[str]:
+    """Legacy rendering path — dispatch by hint type."""
+    num_hints = max(len(hints), 1)
+    time_per_hint = duration / num_hints
+    lines = []
+    for i, hint in enumerate(hints):
+        try:
+            hint_lines = _hint_to_manim(hint, time_per_hint, i, num_hints)
+            lines += hint_lines
+        except Exception:
+            lines += _fallback_hint_lines(hint, time_per_hint)
+    return lines
+
+
+# =====================================================================
+# Rich scene builder — uses objects/steps from validated hints
+# =====================================================================
+
+def _build_rich_scene(hints: list[dict], section_title: str, duration: float) -> list[str]:
+    """Build scene code from rich hints with objects and steps."""
+    lines: list[str] = []
+    # Sort hints by start_fraction
+    sorted_hints = sorted(hints, key=lambda h: h.get("start_fraction", 0.0))
+
+    persistent_objects: set[str] = set()  # names of objects still on screen
+
+    for hint_idx, hint in enumerate(sorted_hints):
+        objects = hint.get("objects", [])
+        steps = hint.get("steps", [])
+        persistent = hint.get("persistent", False)
+
+        # If no objects/steps, fall through to legacy for this hint
+        if not objects and not steps:
+            time_per = duration / max(len(sorted_hints), 1)
+            try:
+                lines += _hint_to_manim(hint, time_per, hint_idx, len(sorted_hints))
+            except Exception:
+                lines += _fallback_hint_lines(hint, time_per)
+            continue
+
+        hint_uid = f"_hint{hint_idx}"
+
+        # Declare objects
+        declared_names: list[str] = []
+        for obj in objects:
+            name = _sanitize_name(obj.get("name", f"obj{hint_idx}"))
+            try:
+                obj_lines = _declare_object(name, obj)
+                lines += obj_lines
+                declared_names.append(name)
+            except Exception:
+                # Fallback: declare as plain text
+                desc = _safe(obj.get("params", {}).get("text", obj.get("name", ""))[:80])
+                lines.append(f'        {name} = Text("{desc}", font_size=28)')
+                declared_names.append(name)
+
+        # Execute steps
+        for step in steps:
+            try:
+                step_lines = _emit_step(step, hint_uid)
+                lines += step_lines
+            except Exception:
+                # Skip failed steps silently
+                pass
+
+        # Cleanup non-persistent objects
+        if not persistent:
+            for name in declared_names:
+                if name not in persistent_objects:
+                    lines.append(f"        try:")
+                    lines.append(f"            self.play(FadeOut({name}), run_time=0.3)")
+                    lines.append(f"        except Exception:")
+                    lines.append(f"            pass")
+        else:
+            persistent_objects.update(declared_names)
+
+    # Final cleanup of any persistent objects still on screen
+    if persistent_objects:
+        obj_list = ", ".join(persistent_objects)
+        lines.append(f"        try:")
+        lines.append(f"            self.play(*[FadeOut(m) for m in [{obj_list}] if m in self.mobjects], run_time=0.5)")
+        lines.append(f"        except Exception:")
+        lines.append(f"            pass")
+
+    # Safety: ensure at least one animation
+    if not lines:
+        lines = _title_card_lines(section_title, duration)
+
+    return lines
+
+
+def _sanitize_name(name: str) -> str:
+    """Sanitize an object name to be a valid Python identifier."""
+    import re as _re
+    name = _re.sub(r'[^a-zA-Z0-9_]', '_', name)
+    if not name or name[0].isdigit():
+        name = "obj_" + name
+    return name
+
+
+# --- Object declaration ---
+
+_DIRECTION_MAP = {
+    "UP": "UP", "DOWN": "DOWN", "LEFT": "LEFT", "RIGHT": "RIGHT",
+    "UL": "UL", "UR": "UR", "DL": "DL", "DR": "DR",
+}
+
+
+def _apply_position(name: str, position: str) -> list[str]:
+    """Generate positioning code for an object."""
+    if not position:
+        return []
+    pos = position.strip()
+    if pos == "ORIGIN":
+        return [f"        {name}.move_to(ORIGIN)"]
+    if pos.startswith("to_edge("):
+        return [f"        {name}.{pos}"]
+    if pos.startswith("to_corner("):
+        return [f"        {name}.{pos}"]
+    if pos.startswith("[") and pos.endswith("]"):
+        return [f"        {name}.move_to({pos})"]
+    return []
+
+
+def _declare_object(name: str, obj: dict) -> list[str]:
+    """Declare a Manim object. Returns lines of Python code."""
+    mtype = obj.get("mobject_type", "Text")
+    params = obj.get("params", {})
+    position = obj.get("position", "")
+    lines: list[str] = []
+
+    if mtype == "Text":
+        text = _safe(str(params.get("text", name))[:120])
+        fs = params.get("font_size", 32)
+        color = params.get("color", "WHITE")
+        lines.append(f'        {name} = Text("{text}", font_size={fs}, color={color})')
+
+    elif mtype == "MathTex":
+        tex = str(params.get("tex", "x")).replace('"', '\\"')
+        fs = params.get("font_size", 36)
+        color = params.get("color", "WHITE")
+        lines.append(f"        try:")
+        lines.append(f'            {name} = MathTex(r"{tex}", font_size={fs}, color={color})')
+        lines.append(f"        except Exception:")
+        lines.append(f'            {name} = Text("{_safe(tex[:80])}", font_size=28, color={color})')
+
+    elif mtype == "BulletedList":
+        items = params.get("items", ["item"])
+        items = [_safe(str(item)[:60]) for item in items[:8]]
+        items_str = ", ".join(f'"{item}"' for item in items)
+        fs = params.get("font_size", 24)
+        lines.append(f"        {name} = BulletedList({items_str}, font_size={fs})")
+
+    elif mtype == "Rectangle":
+        w = params.get("width", 2)
+        h = params.get("height", 1)
+        color = params.get("color", "BLUE")
+        fill = params.get("fill_opacity", 0.0)
+        lines.append(f"        {name} = Rectangle(width={w}, height={h}, color={color}, fill_opacity={fill})")
+
+    elif mtype == "RoundedRectangle":
+        w = params.get("width", 2)
+        h = params.get("height", 1)
+        cr = params.get("corner_radius", 0.2)
+        color = params.get("color", "BLUE")
+        fill = params.get("fill_opacity", 0.0)
+        lines.append(f"        {name} = RoundedRectangle(width={w}, height={h}, corner_radius={cr}, color={color}, fill_opacity={fill})")
+
+    elif mtype == "Circle":
+        r = params.get("radius", 1)
+        color = params.get("color", "BLUE")
+        fill = params.get("fill_opacity", 0.0)
+        lines.append(f"        {name} = Circle(radius={r}, color={color}, fill_opacity={fill})")
+
+    elif mtype == "Arrow":
+        start = params.get("start", [-2, 0, 0])
+        end = params.get("end", [2, 0, 0])
+        color = params.get("color", "WHITE")
+        lines.append(f"        {name} = Arrow(start={start}, end={end}, color={color})")
+
+    elif mtype == "Line":
+        start = params.get("start", [-2, 0, 0])
+        end = params.get("end", [2, 0, 0])
+        color = params.get("color", "WHITE")
+        lines.append(f"        {name} = Line(start={start}, end={end}, color={color})")
+
+    elif mtype == "Dot":
+        point = params.get("point", [0, 0, 0])
+        color = params.get("color", "WHITE")
+        r = params.get("radius", 0.08)
+        lines.append(f"        {name} = Dot(point={point}, color={color}, radius={r})")
+
+    elif mtype == "Brace":
+        target = _sanitize_name(params.get("target", "ORIGIN"))
+        direction = params.get("direction", "DOWN")
+        if direction not in _DIRECTION_MAP:
+            direction = "DOWN"
+        text = _safe(str(params.get("text", ""))[:40])
+        lines.append(f"        try:")
+        lines.append(f"            {name} = BraceLabel({target}, r\"{text}\", brace_direction={direction})")
+        lines.append(f"        except Exception:")
+        lines.append(f'            {name} = Text("{text}", font_size=24)')
+
+    elif mtype == "SurroundingRectangle":
+        target = _sanitize_name(params.get("target", ""))
+        color = params.get("color", "YELLOW")
+        buff = params.get("buff", 0.2)
+        lines.append(f"        try:")
+        lines.append(f"            {name} = SurroundingRectangle({target}, color={color}, buff={buff})")
+        lines.append(f"        except Exception:")
+        lines.append(f'            {name} = Rectangle(width=2, height=1, color={color})')
+
+    elif mtype == "Axes":
+        xr = params.get("x_range", [0, 5, 1])
+        yr = params.get("y_range", [0, 5, 1])
+        xl = params.get("x_length", 5)
+        yl = params.get("y_length", 3)
+        lines.append(f"        {name} = Axes(x_range={xr}, y_range={yr}, x_length={xl}, y_length={yl})")
+
+    elif mtype == "BarChart":
+        values = params.get("values", [1, 2, 3])
+        bar_names = [_safe(str(n)[:15]) for n in params.get("bar_names", [])]
+        bar_colors = params.get("bar_colors", [])
+        yr = params.get("y_range", None)
+        parts = [f"values={values}"]
+        if bar_names:
+            parts.append(f"bar_names={bar_names}")
+        if bar_colors:
+            parts.append(f"bar_colors=[{', '.join(bar_colors)}]")
+        if yr:
+            parts.append(f"y_range={yr}")
+        lines.append(f"        {name} = BarChart({', '.join(parts)})")
+
+    elif mtype == "NumberLine":
+        xr = params.get("x_range", [0, 10, 1])
+        length = params.get("length", 6)
+        inc_nums = params.get("include_numbers", True)
+        lines.append(f"        {name} = NumberLine(x_range={xr}, length={length}, include_numbers={inc_nums})")
+
+    elif mtype == "Code":
+        code = str(params.get("code", "# code"))
+        # Escape for triple-quoted string
+        code = code.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+        lang = params.get("language", "python")
+        fs = params.get("font_size", 18)
+        lines.append(f"        try:")
+        lines.append(f'            {name} = Code(code="""{code}""", language="{lang}", font_size={fs}, background="window")')
+        lines.append(f"        except Exception:")
+        lines.append(f'            {name} = Text("Code", font_size=24)')
+
+    elif mtype == "Table":
+        rows = params.get("rows", [["a", "b"]])
+        # Sanitize all cell values
+        safe_rows = [[_safe(str(cell)[:30]) for cell in row] for row in rows]
+        rows_str = repr(safe_rows)
+        col_labels = params.get("col_labels", None)
+        row_labels = params.get("row_labels", None)
+        lines.append(f"        try:")
+        parts = [rows_str]
+        if col_labels:
+            safe_cl = [_safe(str(l)[:20]) for l in col_labels]
+            parts.append(f"col_labels=[{', '.join(f'Text(\"{l}\")' for l in safe_cl)}]")
+        if row_labels:
+            safe_rl = [_safe(str(l)[:20]) for l in row_labels]
+            parts.append(f"row_labels=[{', '.join(f'Text(\"{l}\")' for l in safe_rl)}]")
+        lines.append(f"            {name} = Table({', '.join(parts)})")
+        lines.append(f"        except Exception:")
+        lines.append(f'            {name} = Text("Table", font_size=24)')
+
+    elif mtype == "VGroup":
+        children = params.get("children", [])
+        children_names = [_sanitize_name(c) for c in children]
+        if children_names:
+            lines.append(f"        try:")
+            lines.append(f"            {name} = VGroup({', '.join(children_names)})")
+            lines.append(f"        except Exception:")
+            lines.append(f"            {name} = VGroup()")
+        else:
+            lines.append(f"        {name} = VGroup()")
+
+    else:
+        # Unknown type — fallback to Text
+        text = _safe(str(params.get("text", name))[:80])
+        lines.append(f'        {name} = Text("{text}", font_size=28)')
+
+    # Apply positioning
+    lines += _apply_position(name, position)
+
+    return lines
+
+
+# --- Step emission ---
+
+def _emit_step(step: dict, hint_uid: str) -> list[str]:
+    """Emit Manim code for a single animation step."""
+    action = step.get("action", "fade_in")
+    target = _sanitize_name(step.get("target", "obj"))
+    params = step.get("params", {})
+    dur = step.get("duration", 1.0)
+    run_time = params.get("run_time", dur)
+    lines: list[str] = []
+
+    if action == "create":
+        lines.append(f"        self.play(Create({target}), run_time={run_time})")
+
+    elif action == "write":
+        lines.append(f"        self.play(Write({target}), run_time={run_time})")
+
+    elif action == "fade_in":
+        shift = params.get("shift", "")
+        if shift and shift in _DIRECTION_MAP:
+            lines.append(f"        self.play(FadeIn({target}, shift={shift}), run_time={run_time})")
+        else:
+            lines.append(f"        self.play(FadeIn({target}), run_time={run_time})")
+
+    elif action == "fade_out":
+        lines.append(f"        self.play(FadeOut({target}), run_time={run_time})")
+
+    elif action == "indicate":
+        sf = params.get("scale_factor", 1.2)
+        color = params.get("color", "")
+        if color:
+            lines.append(f"        self.play(Indicate({target}, scale_factor={sf}, color={color}), run_time={run_time})")
+        else:
+            lines.append(f"        self.play(Indicate({target}, scale_factor={sf}), run_time={run_time})")
+
+    elif action == "transform":
+        dest = _sanitize_name(params.get("target", target))
+        lines.append(f"        self.play(Transform({target}, {dest}), run_time={run_time})")
+
+    elif action == "move_to":
+        pos = params.get("position", "ORIGIN")
+        if isinstance(pos, list):
+            lines.append(f"        self.play({target}.animate.move_to({pos}), run_time={run_time})")
+        else:
+            lines.append(f"        self.play({target}.animate.move_to({pos}), run_time={run_time})")
+
+    elif action == "scale":
+        sf = params.get("scale_factor", 1.5)
+        lines.append(f"        self.play({target}.animate.scale({sf}), run_time={run_time})")
+
+    elif action == "change_color":
+        color = params.get("color", "YELLOW")
+        lines.append(f"        self.play({target}.animate.set_color({color}), run_time={run_time})")
+
+    elif action == "wait":
+        lines.append(f"        self.wait({dur})")
+
+    elif action == "grow_arrow":
+        lines.append(f"        self.play(GrowArrow({target}), run_time={run_time})")
+
+    elif action == "add_plot":
+        func_str = params.get("function", "lambda x: x")
+        color = params.get("color", "YELLOW")
+        xr = params.get("x_range", None)
+        plot_name = f"{hint_uid}_plot"
+        if xr:
+            lines.append(f"        {plot_name} = {target}.plot({func_str}, color={color}, x_range={xr})")
+        else:
+            lines.append(f"        {plot_name} = {target}.plot({func_str}, color={color})")
+        lines.append(f"        self.play(Create({plot_name}), run_time={run_time})")
+
+    else:
+        # Unknown action — do a simple FadeIn
+        lines.append(f"        self.play(FadeIn({target}), run_time={run_time})")
+
+    return lines
+
+
+# =====================================================================
+# Legacy hint rendering (kept for backward compatibility)
+# =====================================================================
 
 def _title_card_lines(title: str, duration: float) -> list[str]:
     safe_title = title.replace("\\", "\\\\").replace('"', '\\"')
@@ -163,7 +543,7 @@ def _fallback_hint_lines(hint: dict, time_per_hint: float) -> list[str]:
 
 
 def _hint_to_manim(hint: dict, time_per_hint: float, index: int, total: int) -> list[str]:
-    """Convert a single hint dict to Manim scene lines."""
+    """Convert a single hint dict to Manim scene lines (legacy path)."""
     hint_type = hint.get("type", "").lower().strip()
     content = hint.get("content", "")
     description = hint.get("description", "")
@@ -188,7 +568,6 @@ def _hint_to_manim(hint: dict, time_per_hint: float, index: int, total: int) -> 
     elif hint_type == "image_placeholder":
         return _image_placeholder_lines(uid, description, style, wait_time)
     else:
-        # Generic text with resolved animation
         return _generic_text_lines(uid, description or content, style, wait_time)
 
 
@@ -197,7 +576,6 @@ def _safe(s: str) -> str:
 
 
 def _equation_lines(uid: str, content: str, style: str, wait: float) -> list[str]:
-    # Try MathTex; content may or may not be LaTeX
     safe = content.replace("\\", "\\\\").replace('"', '\\"')
     return [
         f"        try:",
@@ -211,11 +589,10 @@ def _equation_lines(uid: str, content: str, style: str, wait: float) -> list[str
 
 
 def _bullet_list_lines(uid: str, content: str, style: str, wait: float) -> list[str]:
-    # Split by newline or bullet markers
     items = [line.strip().lstrip("-*").strip() for line in content.split("\n") if line.strip()]
     if not items:
         items = [content[:80]]
-    items = items[:8]  # cap at 8 bullets
+    items = items[:8]
 
     lines = [f"        {uid}_items = VGroup()"]
     for j, item in enumerate(items):
@@ -232,7 +609,6 @@ def _bullet_list_lines(uid: str, content: str, style: str, wait: float) -> list[
 
 
 def _diagram_lines(uid: str, content: str, style: str, wait: float) -> list[str]:
-    # Simple boxes + arrows placeholder
     safe_desc = _safe(content[:60])
     return [
         f'        {uid}_label = Text("{safe_desc}", font_size=24)',

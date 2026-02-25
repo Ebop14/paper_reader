@@ -14,7 +14,7 @@ Requires `brew install ffmpeg` for MP3/MP4 export and `brew install py3cairo pan
 
 ## Architecture
 
-**Backend**: FastAPI (Python) with 3 routers, 10 services, and an in-memory task registry.
+**Backend**: FastAPI (Python) with 3 routers, 11 services, and an in-memory task registry.
 **Frontend**: Vanilla HTML/CSS/JS served as static files. Three-panel layout (papers, script, player).
 
 ### Directory Layout
@@ -34,10 +34,12 @@ app/
 │   ├── llm_service.py   # Claude API (async streaming, prompt caching, verbatim/narrated modes)
 │   ├── tts_service.py   # mlx-audio wrapper (ProcessPoolExecutor, lazy model load)
 │   ├── audio_service.py # pydub concat + overlay + MP3 export
-│   ├── director_service.py    # Pipeline orchestrator (load → script → voiceover → animation → compositing → save)
-│   ├── scriptwriter_service.py # Parallel Claude scriptwriting + aggregation
+│   ├── director_service.py    # Pipeline orchestrator (load → script → annotate → voiceover → animation → compositing → save)
+│   ├── scriptwriter_service.py # Parallel Claude scriptwriting + aggregation (narration only, no animation hints)
+│   ├── annotator_service.py   # Word-anchored annotation agent (separate LLM pass, 4-8 hints/segment, anchor_text→fraction)
+│   ├── hint_validator.py      # Validate/repair animation hints (whitelist checks, fraction normalization, min density)
 │   ├── voiceover_service.py   # TTS wrapper with duration measurement per segment
-│   ├── animation_service.py   # Manim renderer (ProcessPoolExecutor, hint→Scene mapping)
+│   ├── animation_service.py   # Manim renderer (ProcessPoolExecutor, rich scene builder + legacy hint→Scene mapping)
 │   ├── animation_orchestrator.py # Iterates segments, renders animations, patches script
 │   └── compositor_service.py  # ffmpeg mux (video+audio per segment) + concat to final MP4
 └── tasks/
@@ -68,13 +70,16 @@ data/                    # Runtime storage, gitignored
 2. **Generate Video** (pipeline) →
    - `director_service.run_pipeline()` orchestrates all phases
    - Phase 1: Load paper meta, group sections by title
-   - Phase 2: `scriptwriter_service.write_script()` — parallel Claude calls per section group, then aggregator adds intro/outro/transitions → `VideoScript` with estimated durations
+   - Phase 2: `scriptwriter_service.write_script()` — parallel Claude calls per section group, then aggregator adds intro/outro/transitions → `VideoScript` with narration only (empty animation_hints)
+   - Phase 2b: `annotator_service.annotate_script()` — separate LLM pass per segment, generates 4-8 word-anchored animation hints with `anchor_text` → computes `start_fraction`/`end_fraction` from word positions
+   - Phase 2c: `hint_validator.validate_and_repair_hints()` — whitelist checks, fraction normalization, minimum hint density padding
    - Phase 3: `voiceover_service.generate_voiceover()` — sequential TTS per segment via `tts_service.generate_chunk()`, measures actual durations with pydub
-   - Phase 4: `animation_orchestrator.generate_animations()` — sequential Manim render per segment via `animation_service.render_segment()`, maps hint types (equation, bullet_list, diagram, highlight, code, graph, image_placeholder) to Manim scenes
+   - Phase 4: `animation_orchestrator.generate_animations()` — sequential Manim render per segment via `animation_service.render_segment()`, rich scene builder for objects/steps hints, legacy path for type-based hints
    - Phase 5: `compositor_service.composite_video()` — ffmpeg mux (video+audio per segment), then concat into final MP4
    - Script saved to `data/scripts/{id}/script.json` after each phase
-3. **Play** → Web Audio API plays speech segments with volume control, segment-level prev/next. Video player shows final MP4.
-4. **Export** → pydub concatenates WAVs, exports MP3. ffmpeg serves final MP4 for download.
+3. **Re-render Video** → `director_service.run_from_script()` loads existing annotated script, clears old animation/video files, runs Phase 4 + Phase 5 only. Triggered via `POST /api/pipeline/{id}/render`.
+4. **Play** → Web Audio API plays speech segments with volume control, segment-level prev/next. Video player shows final MP4.
+5. **Export** → pydub concatenates WAVs, exports MP3. ffmpeg serves final MP4 for download.
 
 ### API Endpoints
 
@@ -88,6 +93,8 @@ data/                    # Runtime storage, gitignored
 | GET | `/api/papers/{id}/processed/{mode}` | Get processed sections JSON |
 | POST | `/api/pipeline/{id}/start` | Start video pipeline (body: `{voice, speed}`) |
 | GET | `/api/pipeline/{id}/stream` | SSE progress with stages |
+| POST | `/api/pipeline/{id}/render` | Re-render animation+compositing from existing script |
+| GET | `/api/pipeline/{id}/render/stream` | SSE progress for render task |
 | GET | `/api/pipeline/{id}/script` | Get VideoScript JSON |
 | GET | `/api/pipeline/{id}/audio` | List audio segments |
 | GET | `/api/pipeline/{id}/audio/{filename}` | Serve WAV file |
@@ -103,10 +110,13 @@ data/                    # Runtime storage, gitignored
 
 ## Key Patterns
 
-- **Pipeline orchestration**: `director_service` coordinates script → voiceover → animation → compositing phases. Task registry tracks `stage` and `stage_progress` alongside overall progress. Frontend renders a 6-step stage indicator (Loading → Scripting → Voiceover → Animation → Compositing → Done).
+- **Pipeline orchestration**: `director_service` coordinates script → annotate → validate → voiceover → animation → compositing phases. Task registry tracks `stage` and `stage_progress` alongside overall progress. Frontend renders a 7-step stage indicator (Loading → Scripting → Annotating → Voiceover → Animation → Compositing → Done). `run_from_script()` allows re-rendering animation+compositing from an existing annotated script without re-running the full pipeline.
+- **Separated scriptwriting and annotation**: `scriptwriter_service` produces narration-only segments (empty `animation_hints`). `annotator_service` runs a separate LLM pass per segment to generate 4-8 word-anchored animation hints with `anchor_text` fields. This separation lets each agent focus on its strength.
+- **Word-anchored animation hints**: Each `AnimationHint` has an `anchor_text` field — a verbatim phrase from the narration (3-8 words). `_compute_fractions_from_anchor()` maps word positions to `start_fraction`/`end_fraction` so animations sync with speech. Falls back to even spacing if anchor not found.
+- **Hint validation**: `hint_validator` validates/repairs hints before rendering: mobject_type, action, and color whitelists; duration clamping; fraction normalization; minimum 2 hints per segment (pads with title cards). Validates `anchor_text` — uses section_title as fallback if empty.
 - **Parallel scriptwriting**: `scriptwriter_service` fans out one `asyncio.create_task` per section group (e.g. Abstract, Methods, Results each get their own Claude call). Results awaited in order for progress tracking. Aggregator pass adds intro/outro/transitions.
-- **JSON parse retry**: Scriptwriter/aggregator Claude calls attempt to parse JSON from the response. On failure, retry once with prefilled assistant response (`[`). On second failure, fall back gracefully (raw segments or single fallback segment).
-- **Manim animation rendering**: `animation_service` uses `ProcessPoolExecutor(1)` (mirrors TTS pattern) to render Manim scenes via subprocess. Hint types map to Manim objects: `equation`→`MathTex`+`Write`, `bullet_list`→`VGroup`+`FadeIn(lag_ratio)`, `diagram`→`Rectangle`+`Arrow`+`Create`, `highlight`→`Text`+`Indicate`, `code`→`Code`+`FadeIn`, `graph`→`Axes`+`Create`, `image_placeholder`→`Rectangle`+`Text`. 21+ free-form styles normalize to 5 Manim classes (Write, FadeIn, Create, GrowFromCenter, Indicate). Fallback on any error: plain text title card.
+- **JSON parse retry**: Scriptwriter/aggregator/annotator Claude calls attempt to parse JSON from the response. On failure, retry once with prefilled assistant response (`[`). On second failure, fall back gracefully (raw segments, single fallback segment, or empty hints).
+- **Manim animation rendering**: `animation_service` uses `ProcessPoolExecutor(1)` (mirrors TTS pattern) to render Manim scenes via subprocess. Rich scene builder handles hints with `objects`/`steps` arrays directly. Legacy path dispatches by hint type: `equation`→`MathTex`+`Write`, `bullet_list`→`VGroup`+`FadeIn(lag_ratio)`, `diagram`→`Rectangle`+`Arrow`+`Create`, `highlight`→`Text`+`Indicate`, `code`→`Code`+`FadeIn`, `graph`→`Axes`+`Create`, `image_placeholder`→`Rectangle`+`Text`. 21+ free-form styles normalize to 5 Manim classes (Write, FadeIn, Create, GrowFromCenter, Indicate). Fallback on any error: plain text title card.
 - **Video compositing**: `compositor_service` uses async ffmpeg subprocesses. Per-segment mux (`-c:v copy -c:a aac -shortest`), then concat demuxer for final `data/videos/{id}/video.mp4`.
 - **Async background tasks**: Pipeline, LLM, and TTS processing run via `asyncio.create_task()`. Progress tracked in `task_registry` dict, streamed to frontend via SSE (0.5s polling in `sse_stream()`).
 - **TTS concurrency**: `ProcessPoolExecutor` with 1 worker (MLX needs its own process). Sync generation runs in `run_in_executor()`.
@@ -128,6 +138,7 @@ data/                    # Runtime storage, gitignored
 
 - `fastapi` + `uvicorn` — web framework
 - `anthropic` — Claude API (async streaming)
+- `openai` — OpenAI API (fallback for scriptwriter/annotator)
 - `PyMuPDF` (imported as `fitz`) — PDF text extraction
 - `mlx-audio` — on-device TTS via Apple MLX (`mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit`)
 - `pydub` — audio manipulation (requires ffmpeg system dependency)

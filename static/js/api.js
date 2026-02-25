@@ -32,6 +32,18 @@ const API = {
         return this._sse(`/api/pipeline/${paperId}/stream`, onEvent);
     },
 
+    async startRender(paperId) {
+        const res = await fetch(`/api/pipeline/${paperId}/render`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        return res.json();
+    },
+
+    streamRender(paperId, onEvent) {
+        return this._sse(`/api/pipeline/${paperId}/render/stream`, onEvent);
+    },
+
     async getScript(paperId) {
         const res = await fetch(`/api/pipeline/${paperId}/script`);
         if (!res.ok) return null;

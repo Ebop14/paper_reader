@@ -1,8 +1,10 @@
 from collections import OrderedDict
 
-from app.models import PaperMeta, PaperSection, VideoScript
-from app.storage import papers_dir, scripts_dir
+from app.models import PaperMeta, PaperSection, ScriptSegment, VideoScript
+from app.storage import papers_dir, scripts_dir, animations_dir, videos_dir
 from app.services.scriptwriter_service import write_script
+from app.services.annotator_service import annotate_script
+from app.services.hint_validator import validate_and_repair_hints
 from app.services.voiceover_service import generate_voiceover
 from app.services.animation_orchestrator import generate_animations
 from app.services.compositor_service import composite_video
@@ -55,6 +57,22 @@ async def run_pipeline(
             message="Starting script generation...",
         )
         script = await write_script(paper_id, meta, chunk_groups, task_id)
+
+        # Phase 2b: Annotation (word-anchored animation hints)
+        update_task(
+            task_id,
+            stage="annotating",
+            stage_progress=0.0,
+            message="Starting annotation pass...",
+        )
+        script = await annotate_script(script, meta, chunk_groups, task_id)
+        _save_script(paper_id, script)
+
+        # Phase 2c: Validate and repair animation hints
+        update_task(task_id, message="Validating animation hints...")
+        segment_dicts = [s.model_dump() for s in script.segments]
+        repaired = validate_and_repair_hints(segment_dicts)
+        script.segments = [ScriptSegment(**s) for s in repaired]
         _save_script(paper_id, script)
 
         # Phase 3: Voiceover
@@ -96,6 +114,71 @@ async def run_pipeline(
             stage_progress=1.0,
             progress=1.0,
             message="Pipeline complete",
+        )
+
+    except Exception as e:
+        update_task(task_id, status="failed", message=str(e))
+
+
+def _load_script(paper_id: str) -> VideoScript:
+    script_path = scripts_dir() / paper_id / "script.json"
+    if not script_path.exists():
+        raise FileNotFoundError(f"Script for paper {paper_id} not found")
+    return VideoScript.model_validate_json(script_path.read_text())
+
+
+def _clear_renders(paper_id: str) -> None:
+    """Remove existing animation and video files so they get re-rendered."""
+    import shutil
+    for d in (animations_dir() / paper_id, videos_dir() / paper_id):
+        if d.exists():
+            shutil.rmtree(d)
+
+
+async def run_from_script(paper_id: str, task_id: str) -> None:
+    """Load an existing annotated script and run animation + compositing only."""
+    try:
+        # Phase 1: Load script
+        update_task(task_id, stage="loading", message="Loading script...")
+        script = _load_script(paper_id)
+
+        # Clear old renders so animation_service doesn't skip them
+        _clear_renders(paper_id)
+
+        # Update segment animation_file / video_file refs
+        for seg in script.segments:
+            seg.animation_file = None
+        script.video_file = None
+
+        # Phase 2: Animation rendering
+        update_task(
+            task_id,
+            stage="animation",
+            stage_progress=0.0,
+            message="Starting animation rendering...",
+        )
+        script = await generate_animations(paper_id, script, task_id)
+        _save_script(paper_id, script)
+
+        # Phase 3: Compositing
+        update_task(
+            task_id,
+            stage="compositing",
+            stage_progress=0.0,
+            message="Starting video compositing...",
+        )
+        final_video = await composite_video(paper_id, script, task_id)
+        script.video_file = final_video.name
+        _save_script(paper_id, script)
+
+        # Done
+        update_task(
+            task_id,
+            status="completed",
+            stage="done",
+            stage_progress=1.0,
+            progress=1.0,
+            message="Render complete",
         )
 
     except Exception as e:

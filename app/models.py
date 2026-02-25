@@ -51,11 +51,33 @@ class TaskStatus(BaseModel):
 # --- Video Pipeline Models ---
 
 
+class ManimObject(BaseModel):
+    name: str              # e.g. "eq1", "box_a"
+    mobject_type: str       # "Text", "MathTex", "Rectangle", "Axes", "BarChart", etc.
+    params: dict = {}      # type-specific params (text, color, width, etc.)
+    position: str = ""     # "ORIGIN", "to_edge(UP)", "[-3, 0, 0]", etc.
+
+
+class AnimationStep(BaseModel):
+    action: str            # "create", "write", "fade_in", "fade_out", "indicate", "transform", "wait", etc.
+    target: str            # name of object to act on
+    params: dict = {}      # action-specific params (run_time, shift, scale_factor, etc.)
+    duration: float = 1.0
+
+
 class AnimationHint(BaseModel):
+    # Legacy fields (backward compat, all have defaults)
     type: str = ""  # e.g. "equation", "diagram", "bullet_list", "highlight"
     description: str = ""
     content: str = ""  # Raw content (LaTeX, bullet text, etc.)
     style: str = ""  # e.g. "fade_in", "write", "transform"
+    # Rich Manim-aware fields
+    objects: list[ManimObject] = Field(default_factory=list)
+    steps: list[AnimationStep] = Field(default_factory=list)
+    anchor_text: str = ""              # substring of narration_text this hint is tied to
+    persistent: bool = False          # objects stay for next hint
+    start_fraction: float = 0.0       # timing within segment (0.0-1.0)
+    end_fraction: float = 1.0
 
 
 class ScriptSegment(BaseModel):

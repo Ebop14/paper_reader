@@ -6,13 +6,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from app.models import PipelineRequest
 from app.storage import scripts_dir, audio_dir, exports_dir, animations_dir, videos_dir
-from app.services.director_service import run_pipeline
+from app.services.director_service import run_pipeline, run_from_script
 from app.services.audio_service import concat_speech_chunks
 from app.tasks.processing import task_registry, create_task, sse_stream
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
-PIPELINE_STAGES = ["loading", "scripting", "voiceover", "animation", "compositing", "done"]
+PIPELINE_STAGES = ["loading", "scripting", "annotating", "voiceover", "animation", "compositing", "done"]
+RENDER_STAGES = ["loading", "animation", "compositing", "done"]
 
 
 @router.post("/{paper_id}/start")
@@ -29,6 +30,32 @@ async def start_pipeline(paper_id: str, req: PipelineRequest):
         run_pipeline(paper_id, task_id, req.voice, req.speed)
     )
     return {"task_id": task_id, "status": "started"}
+
+
+@router.post("/{paper_id}/render")
+async def start_render(paper_id: str):
+    """Re-render animation + compositing from an existing annotated script."""
+    task_id = f"render-{paper_id}"
+
+    existing = task_registry.get(task_id)
+    if existing and existing["status"] == "running":
+        return {"task_id": task_id, "status": "running"}
+
+    # Verify script exists
+    script_path = scripts_dir() / paper_id / "script.json"
+    if not script_path.exists():
+        raise HTTPException(404, "No script found — run the full pipeline first")
+
+    create_task(task_id, stages=RENDER_STAGES)
+
+    asyncio.create_task(run_from_script(paper_id, task_id))
+    return {"task_id": task_id, "status": "started"}
+
+
+@router.get("/{paper_id}/render/stream")
+async def stream_render(paper_id: str):
+    task_id = f"render-{paper_id}"
+    return StreamingResponse(sse_stream(task_id), media_type="text/event-stream")
 
 
 @router.get("/{paper_id}/stream")

@@ -36,6 +36,7 @@ const App = {
         UI.$('btn-generate').onclick = () => this.runPipeline();
         UI.$('btn-render').onclick = () => this.runRender();
         UI.$('btn-reannotate').onclick = () => this.runReannotate();
+        UI.$('btn-revoice').onclick = () => this.runRevoice();
 
         // Speed display
         UI.$('tts-speed').oninput = (e) => {
@@ -130,9 +131,11 @@ const App = {
             UI.renderPipelineStages('done', 'completed');
             UI.$('btn-render').style.display = '';
             UI.$('btn-reannotate').style.display = '';
+            UI.$('btn-revoice').style.display = '';
         } else {
             UI.$('btn-render').style.display = 'none';
             UI.$('btn-reannotate').style.display = 'none';
+            UI.$('btn-revoice').style.display = 'none';
         }
 
         // Check for existing audio
@@ -190,6 +193,7 @@ const App = {
                 UI.$('btn-generate').disabled = false;
                 UI.$('btn-render').style.display = '';
                 UI.$('btn-reannotate').style.display = '';
+                UI.$('btn-revoice').style.display = '';
                 // Reload final script with actual durations
                 const script = await API.getScript(paper.id);
                 if (script) {
@@ -272,6 +276,47 @@ const App = {
                 UI.$('btn-render').disabled = false;
                 UI.$('btn-generate').disabled = false;
                 alert('Re-annotation failed: ' + data.message);
+            }
+        });
+    },
+
+    async runRevoice() {
+        const paper = this.state.activePaper;
+        if (!paper) return;
+
+        const voice = UI.$('voice-select').value;
+        const speed = parseFloat(UI.$('tts-speed').value);
+
+        UI.$('btn-revoice').disabled = true;
+        UI.$('btn-reannotate').disabled = true;
+        UI.$('btn-render').disabled = true;
+        UI.$('btn-generate').disabled = true;
+
+        await API.startRevoice(paper.id, voice, speed);
+
+        API.streamRevoice(paper.id, async (data) => {
+            UI.showPipelineProgress(data);
+
+            if (data.status === 'completed') {
+                UI.$('btn-revoice').disabled = false;
+                UI.$('btn-reannotate').disabled = false;
+                UI.$('btn-render').disabled = false;
+                UI.$('btn-generate').disabled = false;
+                const script = await API.getScript(paper.id);
+                if (script) {
+                    this.state.script = script;
+                    UI.renderScript(script, -1);
+                    if (script.video_file) {
+                        UI.showVideoPlayer(API.videoURL(paper.id));
+                    }
+                }
+                this.refreshChunks();
+            } else if (data.status === 'failed') {
+                UI.$('btn-revoice').disabled = false;
+                UI.$('btn-reannotate').disabled = false;
+                UI.$('btn-render').disabled = false;
+                UI.$('btn-generate').disabled = false;
+                alert('Revoice failed: ' + data.message);
             }
         });
     },

@@ -1,0 +1,1099 @@
+================================================================================
+PAPER READER — AGENT PIPELINE ARCHITECTURE
+================================================================================
+
+Paper Reader is a full-stack application that transforms academic PDF papers
+into narrated video explainers. It extracts text from PDFs, generates narration
+scripts via LLM agents, synthesizes speech with on-device TTS, creates
+programmatic animations with Manim (driven by a separate LLM agent), and
+composites everything into a final MP4 video. The entire pipeline is
+orchestrated as a sequence of agent phases, each producing artifacts that feed
+into the next.
+
+This document explains every component, every agent, and every data
+transformation in the system.
+
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1.  High-Level Pipeline Overview
+  2.  Technology Stack
+  3.  Directory Structure and Data Layout
+  4.  Data Models (Pydantic Schemas)
+  5.  Phase 1: PDF Upload and Text Extraction
+  6.  Phase 2: Script Generation (Scriptwriter Agent)
+  7.  Phase 2b: Voiceover Generation (TTS Agent)
+  8.  Phase 2c: Animation Code Generation (Annotator Agent)
+  9.  Phase 2d: Hint Validation
+  10. Phase 4: Animation Rendering (Manim Renderer)
+  11. Phase 5: Video Compositing (ffmpeg)
+  12. The Director Service (Pipeline Orchestrator)
+  13. Task Registry and SSE Progress Streaming
+  14. Re-render and Re-annotate Flows
+  15. Frontend Architecture
+  16. Frontend-Backend Communication Protocol
+  17. Audio Playback System
+  18. Configuration and Environment
+  19. Error Handling and Fallback Strategies
+  20. Key Design Decisions and Trade-offs
+
+
+================================================================================
+1. HIGH-LEVEL PIPELINE OVERVIEW
+================================================================================
+
+The pipeline transforms a PDF into a video through six sequential phases:
+
+  PDF Upload
+    |
+    v
+  [Phase 1] TEXT EXTRACTION
+    PyMuPDF extracts raw text, regex detects academic sections (Abstract,
+    Methods, Results, etc.), text is chunked at sentence boundaries (~2000
+    chars per chunk). Output: PaperMeta with list of PaperSection objects.
+    |
+    v
+  [Phase 2] SCRIPT GENERATION  (LLM Agent: Claude Sonnet + Claude Opus)
+    Parallel Claude Sonnet calls write narration per section group. An
+    aggregator pass (Claude Opus) weaves them into a coherent 12-18 segment
+    narrative with intro, outro, transitions, and visual strategy assignments.
+    Output: VideoScript with ScriptSegment objects (narration text, estimated
+    durations at 90 wpm, visual strategy hints — but NO animation code yet).
+    |
+    v
+  [Phase 2b] VOICEOVER GENERATION  (TTS Agent: Qwen3-TTS via MLX)
+    The full narration is synthesized as one continuous audio file at 0.82x
+    speed (deliberately slow for animation breathing room), then split into
+    per-segment WAV clips by word-count proportional timing. Each clip gets
+    2 seconds of trailing silence appended. Actual durations are measured
+    from the real audio and written back into the script.
+    Output: Per-segment WAV files, actual_duration_seconds on each segment.
+    |
+    v
+  [Phase 2c] ANIMATION CODE GENERATION  (LLM Agent: Claude Opus)
+    Claude Opus writes complete Manim Python code (the body of a Scene's
+    construct() method) for each segment. It receives the narration text,
+    the original paper source data, the ACTUAL audio duration (measured in
+    Phase 2b), and a visual strategy hint. The code is stored as a string
+    in segment.manim_code.
+    Output: manim_code field populated on each ScriptSegment.
+    |
+    v
+  [Phase 2d] HINT VALIDATION
+    A rule-based validator checks animation hints (used for UI badge display
+    only — not for rendering). Repairs invalid values, ensures minimum hint
+    counts, normalizes timing fractions.
+    Output: Cleaned animation_hints on each segment.
+    |
+    v
+  [Phase 4] ANIMATION RENDERING  (Manim CLI)
+    Each segment's manim_code is wrapped in a Scene class and rendered via
+    the Manim CLI in a subprocess (ProcessPoolExecutor with 1 worker). On
+    render failure, a simple title card is generated as fallback.
+    Output: Per-segment MP4 files (segment_NNNN.mp4).
+    |
+    v
+  [Phase 5] VIDEO COMPOSITING  (ffmpeg)
+    For each segment, ffmpeg muxes the animation MP4 with the audio WAV.
+    If the animation is shorter than the audio, the last frame is frozen
+    (tpad filter). All muxed segments are concatenated into a single final
+    MP4 video.
+    Output: Final video.mp4.
+
+The script (VideoScript JSON) is saved to disk after every phase, so progress
+is never lost. If the server crashes mid-pipeline, the saved script preserves
+all work completed up to that point.
+
+
+================================================================================
+2. TECHNOLOGY STACK
+================================================================================
+
+Backend:
+  - Python 3.11+ with FastAPI and Uvicorn
+  - Anthropic Python SDK (async streaming) for Claude API calls
+  - OpenAI Python SDK (async) as fallback for scriptwriting
+  - PyMuPDF (fitz) for PDF text extraction
+  - mlx-audio for on-device TTS on Apple Silicon (Qwen3-TTS model)
+  - Manim Community Edition v0.20.0 for programmatic animations
+  - pydub for audio manipulation (WAV splitting, silence padding, MP3 export)
+  - ffmpeg / ffprobe for video muxing and concatenation
+  - pydantic-settings for configuration
+
+Frontend:
+  - Vanilla HTML/CSS/JavaScript (no framework)
+  - Web Audio API with GainNodes for volume-controlled playback
+  - EventSource (SSE) for real-time progress streaming
+  - Three-panel layout: papers list, script viewer, media player
+
+System dependencies:
+  - ffmpeg (brew install ffmpeg)
+  - py3cairo + pango (brew install py3cairo pango) — required by Manim
+  - BasicTeX (brew install --cask basictex) — for LaTeX in Manim, though
+    LaTeX is currently unreliable (missing standalone.cls), so all text in
+    animations uses Text() with Unicode instead of MathTex/Tex
+
+
+================================================================================
+3. DIRECTORY STRUCTURE AND DATA LAYOUT
+================================================================================
+
+Source code layout:
+
+  app/
+  ├── main.py                    FastAPI app, mounts routers + static files
+  ├── config.py                  pydantic-settings, reads .env
+  ├── models.py                  Pydantic schemas for all data types
+  ├── storage.py                 Path helpers for data directories
+  ├── routers/
+  │   ├── papers.py              PDF upload, delete, legacy LLM processing
+  │   ├── pipeline.py            Video pipeline endpoints + SSE streams
+  │   └── tts.py                 Legacy TTS endpoints (backward compat)
+  ├── services/
+  │   ├── pdf_service.py         PyMuPDF extraction, section detection, chunking
+  │   ├── llm_service.py         Legacy per-chunk Claude processing
+  │   ├── scriptwriter_service.py  Parallel scriptwriting + aggregation
+  │   ├── annotator_service.py   Manim code generation agent (Claude Opus)
+  │   ├── voiceover_service.py   TTS wrapper with duration measurement
+  │   ├── tts_service.py         mlx-audio wrapper (ProcessPoolExecutor)
+  │   ├── hint_validator.py      Animation hint validation/repair
+  │   ├── animation_service.py   Manim renderer (ProcessPoolExecutor)
+  │   ├── animation_orchestrator.py  Iterates segments, renders animations
+  │   ├── compositor_service.py  ffmpeg mux + concat to final MP4
+  │   ├── audio_service.py       Legacy audio concat + MP3 export
+  │   └── director_service.py    Pipeline orchestrator (the "director")
+  └── tasks/
+      └── processing.py          In-memory task registry + SSE generator
+
+  static/
+  ├── index.html                 Single-page frontend
+  ├── css/style.css              Dark theme, three-panel layout
+  └── js/
+      ├── api.js                 Fetch + EventSource SSE client
+      ├── app.js                 Main state management + pipeline flow
+      ├── ui.js                  DOM rendering (papers, script, stages)
+      └── audio-mixer.js         Web Audio API dual-source mixer
+
+Runtime data layout (all under data/, gitignored):
+
+  data/
+  ├── papers/{paper_id}/         Uploaded PDF + meta.json
+  ├── processed/{paper_id}/      Legacy verbatim.json / narrated.json
+  ├── audio/{paper_id}/          Per-segment WAV files (chunk_NNNN.wav)
+  ├── scripts/{paper_id}/        script.json (VideoScript)
+  ├── animations/{paper_id}/     Per-segment MP4s (segment_NNNN.mp4)
+  ├── videos/{paper_id}/         Final composited video.mp4
+  └── exports/                   Exported MP3/MP4 downloads
+
+
+================================================================================
+4. DATA MODELS (Pydantic Schemas)
+================================================================================
+
+File: app/models.py
+
+PaperSection
+  - title: str              Section heading (e.g., "Abstract", "Methods")
+  - text: str               Chunk text content
+  - chunk_index: int         Monotonically increasing index across all chunks
+
+PaperMeta
+  - id: str                 12-hex-char UUID
+  - filename: str           Original PDF filename
+  - num_pages: int          Page count from PyMuPDF
+  - sections: list[PaperSection]   All extracted text chunks
+  - total_chars: int        Sum of all section text lengths
+
+ScriptSegment  (the core per-segment model)
+  - segment_index: int      Position in the video (0-based)
+  - section_title: str      Academic section this segment covers
+  - source_chunk_indices: list[int]   Which PaperSection chunks fed this segment
+  - narration_text: str     The actual words spoken by the TTS voice
+  - speaker_notes: str      Visual intent notes from the scriptwriter
+  - visual_strategy: str    One of: data_chart, comparison, process_flow,
+                            concept_map, timeline, metaphor, highlight_list,
+                            layered_diagram, equation, auto
+  - animation_hints: list[AnimationHint]   UI badge display only
+  - manim_code: str         Raw Python code — the construct() body
+  - tts_chunks: list[str]   Set to [narration_text] after voiceover
+  - estimated_duration_seconds: float    90 wpm estimate from scriptwriter
+  - actual_duration_seconds: float|None  Measured from real TTS audio
+  - audio_file: str|None    Filename like "chunk_0003.wav"
+  - animation_file: str|None   Filename like "segment_0003.mp4"
+
+VideoScript  (the top-level document)
+  - paper_id: str
+  - title: str              Paper title
+  - created_at: str         ISO timestamp
+  - total_segments: int
+  - estimated_total_duration_seconds: float
+  - actual_total_duration_seconds: float|None
+  - segments: list[ScriptSegment]
+  - metadata: dict          Arbitrary metadata
+  - video_file: str|None    "video.mp4" when compositing completes
+
+AnimationHint  (legacy/display-only — does NOT drive rendering)
+  - type: str               e.g., "animation"
+  - description: str        e.g., "Manim scene (42 lines)"
+  - objects: list[ManimObject]   Declared mobjects
+  - steps: list[AnimationStep]   Animation sequence
+  - anchor_text: str        Word(s) in narration this hint anchors to
+  - start_fraction: float   When in the segment this hint starts (0.0-1.0)
+  - end_fraction: float     When in the segment this hint ends (0.0-1.0)
+
+The VideoScript is serialized to data/scripts/{paper_id}/script.json after
+every pipeline phase. This serves as both the persistence format and the
+inter-phase communication channel — each phase reads fields set by previous
+phases and writes its own fields.
+
+
+================================================================================
+5. PHASE 1: PDF UPLOAD AND TEXT EXTRACTION
+================================================================================
+
+File: app/services/pdf_service.py
+Triggered by: POST /api/papers/upload (app/routers/papers.py)
+
+Step 1: Extract raw text
+  - PyMuPDF (fitz.open) reads every page of the PDF
+  - page.get_text() extracts text per page
+  - All pages joined with newlines into one string
+
+Step 2: Detect academic sections
+  - A compiled regex (SECTION_RE) matches common academic headings:
+    Abstract, Introduction, Background, Related Work, Methodology, Methods,
+    Approach, Experiments, Results, Discussion, Conclusion, Acknowledgments,
+    References, Appendix
+  - The regex is case-insensitive and multi-line
+  - Text is split at heading boundaries into (title, body) pairs
+  - Text before the first heading becomes a "Preamble" section
+  - If no headings are found, the entire text becomes "Full Text"
+
+Step 3: Chunk at sentence boundaries
+  - Each section body is split at sentence boundaries (regex: (?<=[.!?])\s+)
+  - Sentences are greedily accumulated into chunks up to ~2000 characters
+  - This ensures chunks don't break mid-sentence
+
+Step 4: Create PaperMeta
+  - Each chunk becomes a PaperSection with a monotonically increasing
+    chunk_index (continuous across all sections)
+  - PaperMeta is saved as data/papers/{paper_id}/meta.json
+
+The chunk_index is important because it's the universal addressing scheme
+used throughout the pipeline — script segments reference which chunk_indices
+they were derived from, and the frontend uses chunk indices to highlight
+corresponding sections during playback.
+
+
+================================================================================
+6. PHASE 2: SCRIPT GENERATION (SCRIPTWRITER AGENT)
+================================================================================
+
+File: app/services/scriptwriter_service.py
+Orchestrated by: director_service.run_pipeline()
+LLM models: Claude Sonnet (claude-sonnet-4-20250514) for section drafts,
+            Claude Opus (claude-opus-4-20250514) for aggregation
+
+This phase has two sub-passes: parallel drafting and aggregation.
+
+--- Sub-pass A: Parallel Section Drafting ---
+
+The director groups PaperSections by their section title (e.g., all "Methods"
+chunks together, all "Results" chunks together). Each group gets its own
+independent Claude Sonnet call.
+
+For each section group, the scriptwriter:
+  1. Concatenates all chunk texts in that group
+  2. Sends them to Claude Sonnet with a system prompt that says:
+     "Write video narration segments of 40-60 words each (15-25 seconds at
+      ~1.5 words/sec). Each segment should have section_title, narration_text,
+      and speaker_notes. Output as a JSON array."
+  3. The calls are launched as parallel asyncio tasks with 0.5s stagger
+     between launches (to avoid rate limits)
+  4. Results are awaited in order for progress tracking
+
+Fallback chain for each section call:
+  - Try Claude Sonnet
+  - On JSON parse failure, retry once with prefilled assistant response "["
+  - On second failure, try OpenAI gpt-4o (if API key is configured)
+  - On total failure, fall back to a single raw-text segment
+
+--- Sub-pass B: Aggregation ---
+
+All section drafts are collected into a flat list of segment dicts. The
+aggregator (Claude Opus) receives the full list and:
+  1. Adds an introduction segment and a conclusion/outro segment
+  2. Adds transitions between major sections
+  3. Assigns a visual_strategy to each segment (one of 9 types — see the
+     annotator section below for what each strategy means)
+  4. Enforces TTS pacing rules (40-60 words per segment)
+  5. Ensures transition variety (no two consecutive segments use the same
+     transition phrase)
+  6. Caps output at 12-18 segments
+  7. Returns a JSON array of refined segments
+
+The aggregator system prompt is ~93 lines and includes detailed rules about
+narrative structure, pacing, and visual strategy assignment.
+
+Fallback chain for aggregation:
+  - Try Claude Opus
+  - On failure, try OpenAI gpt-4o
+  - On total failure, use the raw section drafts unmodified
+
+After aggregation, the scriptwriter:
+  - Hard-caps at MAX_SEGMENTS = 18
+  - Estimates duration for each segment using _estimate_duration() at 90 wpm
+    (because Qwen3-TTS speaks at ~1.5 words/sec, much slower than human
+    speech at ~2.5 words/sec)
+  - Constructs ScriptSegment objects with empty animation_hints and
+    empty manim_code
+  - Returns a VideoScript
+
+Duration estimation formula:
+  estimated_duration_seconds = (word_count / 90.0) * 60.0
+
+This estimate is a rough approximation. The real audio duration is measured
+in Phase 2b (voiceover) and written to actual_duration_seconds, which is
+what the annotator actually uses.
+
+
+================================================================================
+7. PHASE 2b: VOICEOVER GENERATION (TTS AGENT)
+================================================================================
+
+File: app/services/voiceover_service.py
+Worker: app/services/tts_service.py
+Orchestrated by: director_service.run_pipeline()
+Model: Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit via mlx-audio on Apple Silicon
+
+CRITICAL DESIGN DECISION: Voiceover runs BEFORE animation code generation.
+This means the annotator (Phase 2c) receives real measured audio durations
+instead of estimates. This is the key architectural choice that ensures
+animations are timed correctly to match the actual speech.
+
+--- Speed Adjustment ---
+
+The user-selected speed (default 1.0) is multiplied by 0.82:
+  effective_speed = speed * 0.82
+
+This deliberately slows the TTS output by ~18%, giving animations more time
+to play and creating a more relaxed viewing experience. At the default speed
+of 1.0, the effective TTS speed is 0.82x.
+
+--- Pass 1: Full Narration TTS ---
+
+Rather than generating TTS per-segment (which would lose prosody context at
+segment boundaries), the voiceover service:
+  1. Concatenates ALL segment narration texts with " ... " separators
+     (the ellipsis gives the TTS model natural breathing room between
+      segments without hard silence boundaries)
+  2. Generates one single WAV file for the entire narration
+  3. This gives the TTS model full context for natural prosody
+
+The TTS call goes through tts_service.generate_chunk(), which runs the
+MLX model in a ProcessPoolExecutor with 1 worker (MLX is not thread-safe;
+each process gets its own Metal context on Apple Silicon).
+
+The mlx-audio API call:
+  generate_audio(
+    text=full_narration,
+    model=_worker_model,         # Loaded once per worker process
+    voice=voice,                 # e.g., "serena"
+    speed=effective_speed,       # 0.82x default
+    output_path=out_dir,
+    file_prefix="full_narration",
+    audio_format="wav",
+    join_audio=True,
+    play=False,
+    verbose=False,
+  )
+
+--- Pass 2: Split into Per-Segment Clips ---
+
+The full narration WAV is loaded with pydub and split proportionally:
+  1. For each segment, calculate its proportion of the total word count:
+       proportion = word_counts[i] / total_words
+  2. Slice that proportion of the total audio duration:
+       seg_dur_ms = int(proportion * total_duration_ms)
+  3. The last segment gets all remaining audio (absorbs rounding drift)
+  4. Append 2 seconds of silence to each segment clip:
+       seg_audio = seg_audio + AudioSegment.silent(duration=2000)
+     This trailing silence gives animations time to complete their final
+     fade-out without the compositor freezing on a mid-animation frame.
+  5. Export each clip as chunk_NNNN.wav
+  6. Measure actual duration: segment.actual_duration_seconds = len(seg_audio) / 1000.0
+
+After splitting, the full narration file is deleted to save disk space.
+
+The actual_total_duration_seconds is computed as the sum of all segment
+actual durations. This is the authoritative total video length.
+
+Available voices: serena, vivian, ryan, aiden, eric, dylan, sohee, ono_anna,
+uncle_fu. These are Qwen3-TTS voice presets.
+
+
+================================================================================
+8. PHASE 2c: ANIMATION CODE GENERATION (ANNOTATOR AGENT)
+================================================================================
+
+File: app/services/annotator_service.py
+Orchestrated by: director_service.run_pipeline()
+LLM model: Claude Opus (claude-opus-4-20250514)
+
+This is the most complex LLM agent in the system. It writes complete Python
+code for each segment's animation — not pseudocode, not hints, but actual
+executable Manim construct() method bodies.
+
+--- What the Annotator Receives ---
+
+For each segment, the annotator receives:
+  1. Section title (e.g., "Methods")
+  2. DURATION in seconds — this is the actual_duration_seconds measured from
+     the real TTS audio in Phase 2b (falls back to estimated if actual is
+     unavailable, then to 20.0 as last resort)
+  3. VISUAL_STRATEGY hint (one of 9 types, assigned by the aggregator)
+  4. Narration text (what the audience hears during this animation)
+  5. Speaker notes (visual intent from the scriptwriter)
+  6. Paper source text (up to 6000 chars of the original academic text)
+
+--- What the Annotator Produces ---
+
+Raw Python code that forms the body of:
+  from manim import *
+  class SegmentScene(Scene):
+      def construct(self):
+          # <annotator's code goes here, indented 8 spaces>
+
+The code uses standard Manim Community Edition v0.20.0 API calls:
+self.play(), self.wait(), self.add(), etc.
+
+--- The System Prompt (ANIMATOR_SYSTEM) ---
+
+The annotator's system prompt is ~188 lines and is one of the most carefully
+engineered parts of the system. It includes:
+
+  Hard rules:
+  - Code only, no markdown, no commentary
+  - Total animation run_time + wait time must fill DURATION seconds
+  - NEVER use MathTex or Tex (LaTeX is broken — missing standalone.cls)
+  - Use Text() with Unicode for all text including math: "E = mc²", "O(n²)"
+  - NEVER use GrowArrow() on CurvedArrow (causes infinite hang)
+  - Sector uses radius=, NOT outer_radius= (TypeError)
+  - Only use colors from a strict whitelist (no ORANGE_C, PURPLE_A, etc.)
+  - Don't use BarChart class (requires LaTeX); build manual bar charts with
+    Rectangle + Text
+  - Don't use include_numbers or add_coordinates on Axes (LaTeX crash)
+
+  Spatial constraints:
+  - Manim frame is 14.2 x 8 units
+  - Safe zone: x in [-6.5, 6.5], y in [-3.5, 3.5]
+  - Text size limits: title <= 36pt, body <= 26pt, labels <= 22pt
+  - Axes sizing: x_length <= 8, y_length <= 4.5
+  - Overflow guard pattern (scale_to_fit_width/height after building VGroups)
+  - Character width estimates per font size for collision avoidance
+  - Rules for label placement (alternate UP/DOWN, minimum buff values)
+
+  Visual strategy patterns (9 types):
+  - data_chart: Axes with plotted points/lines, or manual Rectangle bar charts
+  - comparison: Two-column layout (RED=old, GREEN=new) with connecting arrows
+  - process_flow: Left-to-right or top-to-bottom boxes connected by arrows
+  - concept_map: Central node with branching satellite connections
+  - timeline: Horizontal line with dots and alternating labels
+  - metaphor: Concrete visual analogy from speaker_notes
+  - highlight_list: Vertical stack with icon shapes + text labels
+  - layered_diagram: Stacked horizontal rectangles (layer cake)
+  - equation: Centered Unicode equation with annotating arrows/braces
+  - auto: Analyze content and pick the best pattern
+
+  Duration filling instructions:
+  - After all animations finish, calculate remaining time
+  - Add self.wait(remaining - 1.0) to hold the final visual
+  - Fade out all objects as the last action
+  - Spread self.wait() pauses throughout (not just at the end)
+
+  Style guide:
+  - Progressive reveal (build up complexity step by step)
+  - Meaningful color usage
+  - Spatial layout conventions
+  - Real data from the paper (actual numbers, equations, method names)
+  - Rich visuals, NOT just text cards
+
+--- Processing Flow ---
+
+The annotator processes segments sequentially (not in parallel) with a 0.5s
+delay between calls to avoid rate limits. For each segment:
+
+  1. Look up the paper source text for this segment's section_title
+     - Exact match first
+     - Partial case-insensitive match second
+     - All source text (truncated to 4000 chars) as last resort
+  2. Call _generate_manim_code() with Claude Opus
+     - max_tokens=8192 (animation code can be long)
+     - System prompt cached with cache_control: {"type": "ephemeral"}
+  3. Extract code from response (strip markdown fences if present)
+  4. Validate: code must contain self.play, self.wait, or self.add
+  5. On failure: fall back to a simple title card (FadeIn → wait → FadeOut)
+  6. Store code in segment.manim_code
+  7. Create a minimal AnimationHint for UI badge display
+
+--- Why Claude Opus and Not Sonnet ---
+
+The annotator uses Opus (the most capable model) because:
+  - It must write syntactically correct, runnable Python code
+  - It must respect spatial constraints and avoid dozens of known pitfalls
+  - It must create visually interesting animations, not just text cards
+  - It must accurately time animations to fill the exact audio duration
+  - Sonnet was found to produce too many rendering errors in practice
+
+
+================================================================================
+9. PHASE 2d: HINT VALIDATION
+================================================================================
+
+File: app/services/hint_validator.py
+Orchestrated by: director_service.run_pipeline()
+
+This is a purely rule-based (non-LLM) validation pass. It does NOT affect
+rendering — it only cleans up the AnimationHint objects used for UI badge
+display in the frontend.
+
+Validations performed:
+  - mobject_type must be in a whitelist of 20 valid Manim types
+  - action must be in a whitelist of 12 valid animation actions
+  - color must be in a whitelist of 12 base colors
+  - duration clamped to [0.3, 5.0] seconds
+  - Empty anchor_text filled from section_title
+  - Empty step targets repaired by cycling through declared object names
+  - start_fraction and end_fraction clamped to [0.0, 1.0]
+  - end_fraction must be > start_fraction (minimum 0.2 gap)
+  - Minimum 2 hints per segment (title card hints added if needed)
+  - Fractions normalized: if all default, assign evenly spaced slots
+
+Invalid values are repaired rather than rejected — the validator never
+raises errors, it always produces valid output.
+
+
+================================================================================
+10. PHASE 4: ANIMATION RENDERING (MANIM RENDERER)
+================================================================================
+
+File: app/services/animation_service.py
+Orchestrator: app/services/animation_orchestrator.py
+Orchestrated by: director_service.run_pipeline()
+
+--- The Orchestrator ---
+
+animation_orchestrator.generate_animations() iterates segments sequentially:
+  1. For each segment, resolve duration:
+     actual_duration_seconds > estimated_duration_seconds > 5.0 (fallback)
+  2. Call animation_service.render_segment()
+  3. Set segment.animation_file = mp4_path.name
+
+--- The Renderer ---
+
+animation_service.render_segment() has two paths:
+
+  Primary path (LLM-generated code):
+  1. If segment.manim_code is non-empty:
+     a. Normalize indentation: LLMs sometimes return code with 0-space or
+        4-space indentation instead of the required 8-space. The normalizer
+        finds the modal (most common) indent level across all lines and
+        shifts all lines so that modal becomes 8 spaces.
+     b. Wrap in a Scene class:
+          from manim import *
+          class SegmentScene(Scene):
+              def construct(self):
+                  {normalized code}
+     c. Write to a temporary scene.py file
+     d. Run Manim CLI as a subprocess:
+          manim render scene.py SegmentScene -ql --format mp4
+            --media_dir {tmpdir} --disable_caching
+        - -ql = low quality (854x480, 15fps) for speed
+        - --disable_caching prevents stale cache from skipping re-renders
+        - 180 second timeout
+     e. Find the rendered MP4 in the temp directory (rglob("*.mp4"))
+     f. Copy to data/animations/{paper_id}/segment_NNNN.mp4
+
+  Fallback path (title card):
+  If the primary path fails (render error, timeout, empty code), a simple
+  title card is rendered instead:
+    title = Text("{section_title}", font_size=36)
+    self.play(FadeIn(title), run_time=1.0)
+    self.wait({duration - 2.0})
+    self.play(FadeOut(title), run_time=1.0)
+
+The renderer uses a ProcessPoolExecutor with max_workers=1. This is because
+Manim rendering is CPU-intensive and memory-heavy, and running multiple
+renders in parallel on a single machine would cause thrashing.
+
+--- Why Not Pre-validate the Code? ---
+
+The system intentionally does NOT try to parse or validate the LLM-generated
+Python code before rendering. This is because:
+  1. The code uses Manim-specific APIs that can't be validated without
+     importing the full Manim library
+  2. Many render failures are runtime errors (wrong coordinates, missing
+     objects) that can't be caught by static analysis
+  3. The fallback title card is a reliable safety net
+  4. Attempting validation would add complexity without much benefit
+
+
+================================================================================
+11. PHASE 5: VIDEO COMPOSITING (ffmpeg)
+================================================================================
+
+File: app/services/compositor_service.py
+Orchestrated by: director_service.run_pipeline()
+
+--- Per-Segment Muxing ---
+
+For each segment, _combine_segment() runs ffmpeg to mux the animation video
+with the audio:
+
+  1. Probe actual audio duration with ffprobe
+  2. Apply tpad filter to freeze the last video frame:
+       -filter_complex "[0:v]tpad=stop_mode=clone:stop_duration={audio_dur + 1}[v]"
+     This extends the video by cloning its last frame for audio_dur + 1
+     seconds beyond the video's natural end. If the animation finishes
+     before the narration, the viewer sees the final visual held steady
+     (rather than a black screen or a jarring loop).
+  3. Map the padded video and original audio
+  4. Encode: libx264 -preset ultrafast -crf 28 -pix_fmt yuv420p, audio aac
+  5. Trim to exact audio length: -t {audio_dur:.3f}
+     This ensures the output is exactly as long as the audio — never shorter,
+     never longer.
+
+Each muxed segment goes to a temporary directory as muxed_NNNN.mp4.
+
+--- Final Concatenation ---
+
+All muxed segments are concatenated using ffmpeg's concat demuxer:
+  1. Write concat.txt with one "file '/path/to/muxed_NNNN.mp4'" per segment
+  2. Run: ffmpeg -f concat -safe 0 -i concat.txt -c copy video.mp4
+     The -c copy flag means no re-encoding — just binary concatenation.
+     This is fast and lossless (all segments share the same codec settings).
+
+Output: data/videos/{paper_id}/video.mp4
+
+Segments missing either video or audio are silently skipped. If no segments
+can be muxed, a RuntimeError is raised.
+
+
+================================================================================
+12. THE DIRECTOR SERVICE (PIPELINE ORCHESTRATOR)
+================================================================================
+
+File: app/services/director_service.py
+
+The director is the central orchestrator that coordinates all pipeline phases.
+It provides three entry points:
+
+--- run_pipeline() — Full Pipeline ---
+
+  Phase order: Loading → Scripting → Voiceover → Annotating → Validate →
+               Animation → Compositing → Done
+
+  1. _load_paper_meta(paper_id) — Read meta.json
+  2. _group_sections(meta.sections) — Group by title using OrderedDict
+  3. write_script() — Parallel Claude Sonnet + Opus aggregation
+  4. generate_voiceover() — TTS + split + measure durations
+     _save_script() after this phase
+  5. annotate_script() — Claude Opus per-segment Manim code
+     _save_script() after this phase
+  6. validate_and_repair_hints() — Rule-based hint cleanup
+     _save_script() after this phase
+  7. generate_animations() — Manim render per segment
+     _save_script() after this phase
+  8. composite_video() — ffmpeg mux + concat
+     Set script.video_file, _save_script() after this phase
+  9. Update task status to "completed"
+
+  Error handling: the entire function body is wrapped in try/except Exception.
+  On any failure, the task is marked as "failed" with the exception message.
+  The script saved after each phase means partial progress is preserved.
+
+--- run_reannotate() — Re-generate Animation Code + Re-render ---
+
+  Used when: The user wants fresh animation code (e.g., after improving the
+  annotator prompt) but wants to keep the existing script and voiceover.
+
+  1. Load existing script and paper meta
+  2. Clear old renders (shutil.rmtree on animations/ and videos/)
+  3. Clear manim_code, animation_hints, animation_file on all segments
+  4. Run annotate_script() (fresh Claude Opus calls)
+  5. Run validate_and_repair_hints()
+  6. Run generate_animations()
+  7. Run composite_video()
+
+  Since voiceover already ran, actual_duration_seconds is available, so the
+  annotator gets real audio durations.
+
+--- run_from_script() — Re-render Only ---
+
+  Used when: The user wants to re-render existing animation code (e.g., after
+  a Manim version update or to retry failed renders) without re-running any
+  LLM calls.
+
+  1. Load existing script
+  2. Clear old animation and video files
+  3. Run generate_animations() (uses existing manim_code)
+  4. Run composite_video()
+
+  No LLM calls are made. This is the cheapest re-run option.
+
+
+================================================================================
+13. TASK REGISTRY AND SSE PROGRESS STREAMING
+================================================================================
+
+File: app/tasks/processing.py
+
+The task registry is an in-memory dictionary that tracks the state of all
+running background tasks. It is NOT persisted to disk — task state is lost
+on server restart.
+
+--- Task State Structure ---
+
+  {
+    "status": "running" | "completed" | "failed",
+    "progress": 0.0 - 1.0,           # Overall progress
+    "current_chunk": int,              # Current item being processed
+    "total_chunks": int,               # Total items to process
+    "message": "Human-readable status message",
+    "updated_at": float,               # time.time() of last update
+    "stages": ["loading", "scripting", ...],   # Ordered stage names
+    "stage": "scripting",             # Current stage name
+    "stage_progress": 0.0 - 1.0,     # Progress within current stage
+  }
+
+--- Task IDs ---
+
+  - "pipeline-{paper_id}" — Full video pipeline
+  - "render-{paper_id}" — Re-render from existing script
+  - "reannotate-{paper_id}" — Re-annotate + re-render
+  - "llm-{paper_id}-{mode}" — Legacy LLM processing
+  - "tts-{paper_id}" — Legacy TTS generation
+
+--- SSE Streaming ---
+
+sse_stream(task_id) is an async generator that:
+  1. Polls task_registry every 0.5 seconds
+  2. Yields SSE events ("data: {json}\n\n") only when updated_at changes
+  3. Returns "not_found" if the task doesn't exist
+  4. Exits when status is "completed" or "failed"
+
+The frontend opens an EventSource connection to the appropriate stream
+endpoint. The backend's 0.5s polling interval means UI updates arrive
+within 0.5s of any progress change.
+
+--- Stage System ---
+
+Pipeline tasks have a stages list (e.g., ["loading", "scripting", "voiceover",
+"annotating", "animation", "compositing", "done"]). The current stage name
+and stage_progress (0.0-1.0 within that stage) are tracked separately from
+overall progress. The frontend renders these as a 7-dot stage indicator with
+active/completed/failed styling.
+
+
+================================================================================
+14. RE-RENDER AND RE-ANNOTATE FLOWS
+================================================================================
+
+The system supports three levels of re-processing, from cheapest to most
+expensive:
+
+  1. Re-render (cheapest):
+     POST /api/pipeline/{id}/render
+     - Uses existing script with existing manim_code
+     - Only re-runs Manim rendering + ffmpeg compositing
+     - No LLM calls
+     - Useful when: Manim rendering failed due to transient issues,
+       or you want to try rendering at different quality settings
+
+  2. Re-annotate (moderate):
+     POST /api/pipeline/{id}/reannotate
+     - Keeps existing script and voiceover audio
+     - Re-generates manim_code via Claude Opus (fresh LLM calls)
+     - Re-renders animations and re-composites video
+     - Useful when: Animation code was bad but narration was good,
+       or after improving the annotator prompt
+
+  3. Full pipeline (most expensive):
+     POST /api/pipeline/{id}/start
+     - Runs everything from scratch: script → voiceover → annotate →
+       render → composite
+     - Useful when: Starting fresh or after major changes
+
+Each flow has its own task ID prefix (pipeline-, render-, reannotate-),
+its own stage list, and its own SSE stream endpoint. The frontend shows
+appropriate buttons based on what data already exists.
+
+
+================================================================================
+15. FRONTEND ARCHITECTURE
+================================================================================
+
+File: static/index.html, static/js/app.js, static/js/ui.js, static/js/api.js
+
+The frontend is a single HTML page with three panels:
+
+  Left panel (260px fixed):
+    - PDF upload zone (button + drag-and-drop)
+    - Paper list with select and delete actions
+
+  Center panel (flexible width):
+    - Paper/script title
+    - Pipeline controls (voice selector, speed slider, generate/render buttons)
+    - Pipeline stage indicator (7 dots with labels)
+    - Progress bar with message
+    - Text content area (raw sections before pipeline, script segment cards after)
+
+  Right panel (300px fixed):
+    - Audio player (play/pause/prev/next, volume control, chunk indicator)
+    - Animation browser (video element with prev/next navigation)
+    - Video player (final composited video)
+    - Export buttons (download voiceover MP3, download video MP4)
+
+--- State Management (app.js) ---
+
+All application state lives in a single App.state object:
+  {
+    papers: [],           // All papers from /api/papers
+    activePaper: null,    // Currently selected paper
+    script: null,         // VideoScript JSON
+    chunks: [],           // Audio chunk file list
+    currentChunk: 0,      // Current audio segment index
+    playing: false,       // Audio playback state
+    animations: [],       // Animation MP4 file list
+    currentAnimation: 0,  // Current animation index
+  }
+
+--- Separation of Concerns ---
+
+  api.js:  Pure HTTP/SSE layer. No DOM, no state. Just fetch() calls and
+           EventSource management. Returns raw data.
+
+  ui.js:   Pure DOM manipulation layer. No API calls, no state ownership.
+           Receives data and updates the DOM. All methods are synchronous.
+
+  app.js:  Controller layer. Owns state, wires events, coordinates between
+           API and UI. All business logic lives here.
+
+  audio-mixer.js: Web Audio API wrapper. Manages two audio sources (speech
+                  and music) through GainNodes for volume control.
+
+--- Progressive Playback ---
+
+During pipeline execution, the frontend doesn't wait for all phases to
+complete before showing results. As soon as the voiceover phase starts
+producing audio chunks, the frontend begins fetching and displaying them:
+
+  1. SSE event arrives with stage="voiceover" and current_chunk >= 1
+  2. App.refreshChunks() fetches the latest chunk list
+  3. Audio player becomes visible
+  4. User can start listening while animation generation is still running
+
+Similarly, the script is fetched and displayed as segment cards as soon as
+the scripting phase completes, even before voiceover starts.
+
+
+================================================================================
+16. FRONTEND-BACKEND COMMUNICATION PROTOCOL
+================================================================================
+
+--- REST Endpoints ---
+
+  POST /api/papers/upload          Upload PDF (multipart)
+  GET  /api/papers                 List all papers
+  GET  /api/papers/{id}            Get paper metadata
+  DELETE /api/papers/{id}          Delete paper and all data
+
+  POST /api/pipeline/{id}/start    Start full pipeline (JSON: voice, speed)
+  POST /api/pipeline/{id}/render   Start re-render
+  POST /api/pipeline/{id}/reannotate  Start re-annotation + re-render
+  GET  /api/pipeline/{id}/script   Get VideoScript JSON
+  GET  /api/pipeline/{id}/audio    List audio chunk files
+  GET  /api/pipeline/{id}/audio/{f}  Serve WAV file
+  GET  /api/pipeline/{id}/animations  List animation MP4 files
+  GET  /api/pipeline/{id}/animations/{f}  Serve animation MP4
+  GET  /api/pipeline/{id}/video    Serve final video MP4
+  POST /api/pipeline/{id}/export   Export voiceover as MP3 download
+  POST /api/pipeline/{id}/export-video  Export video as MP4 download
+
+--- Server-Sent Events (SSE) ---
+
+  GET /api/pipeline/{id}/stream           Pipeline progress
+  GET /api/pipeline/{id}/render/stream    Render progress
+  GET /api/pipeline/{id}/reannotate/stream  Re-annotate progress
+
+SSE event payload:
+  {
+    "status": "running" | "completed" | "failed" | "not_found",
+    "stage": "loading" | "scripting" | "voiceover" | "annotating" |
+             "animation" | "compositing" | "done",
+    "stage_progress": 0.0 - 1.0,
+    "current_chunk": N,
+    "total_chunks": N,
+    "message": "Human-readable status text",
+    "progress": 0.0 - 1.0
+  }
+
+The frontend's api.js _sse() helper auto-closes the EventSource when status
+reaches "completed", "failed", or "not_found".
+
+
+================================================================================
+17. AUDIO PLAYBACK SYSTEM
+================================================================================
+
+File: static/js/audio-mixer.js
+
+The AudioMixer class wraps the Web Audio API to provide gain-controlled audio
+playback. It uses a lazy initialization pattern — the AudioContext is only
+created on the first play action (required by browsers that block autoplay).
+
+Audio routing:
+  <audio id="audio-speech"> → MediaElementSource → GainNode → destination
+  <audio id="audio-music">  → MediaElementSource → GainNode → destination
+
+The music channel exists but is not exposed in the current UI (the music/mix
+features were removed). Only the speech channel is active.
+
+Playback flow:
+  1. User clicks play → App.togglePlay() → App.playChunk(currentChunk)
+  2. playChunk() gets audio URL from API.pipelineAudioURL()
+  3. mixer.playSpeech(url) sets the <audio> src and calls .play()
+  4. When audio ends, mixer.onSpeechEnded fires → App.nextChunk()
+  5. nextChunk() calls playChunk(currentChunk + 1) → auto-advances
+  6. When the last chunk finishes, playing stops
+
+Volume control:
+  - The vol-speech range input (0.0-1.0) calls mixer.setSpeechVolume()
+  - This sets the GainNode value, which scales the audio signal
+
+Segment synchronization:
+  - When a chunk plays, UI.highlightChunk() adds "active-chunk" class to
+    the corresponding script segment card
+  - UI.scrollToChunk() smoothly scrolls the segment card into view
+
+
+================================================================================
+18. CONFIGURATION AND ENVIRONMENT
+================================================================================
+
+File: app/config.py, .env
+
+Configuration is managed via pydantic-settings, reading from a .env file:
+
+  ANTHROPIC_API_KEY    Required. Used for all Claude API calls.
+  OPENAI_API_KEY       Optional. Used as fallback for scriptwriting.
+  TTS_MODEL            Default: "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"
+  TTS_WORKERS          Default: 1 (ProcessPoolExecutor workers for TTS)
+  MUSICGEN_MODEL       Default: "facebook/musicgen-small" (unused currently)
+  HOST                 Default: "0.0.0.0"
+  PORT                 Default: 8000
+
+The Settings class also computes:
+  BASE_DIR = parent of app/ directory
+  DATA_DIR = BASE_DIR / "data"
+
+All data directory paths are derived from DATA_DIR via storage.py helpers.
+
+
+================================================================================
+19. ERROR HANDLING AND FALLBACK STRATEGIES
+================================================================================
+
+The system is designed with multiple layers of fallback to be resilient to
+LLM and rendering failures:
+
+--- Scriptwriter Fallbacks ---
+  1. Claude Sonnet → retry with prefilled "[" → OpenAI gpt-4o → raw text
+  2. Aggregator: Claude Opus → OpenAI gpt-4o → use raw section drafts
+
+--- Annotator Fallbacks ---
+  1. Claude Opus code → extract and validate → title card on failure
+  2. Code must contain self.play/self.wait/self.add or falls back to title card
+
+--- Animation Rendering Fallbacks ---
+  1. Render LLM-generated code → on any exception → render title card
+  2. Title card is a simple FadeIn/wait/FadeOut that always succeeds
+
+--- Compositor Fallbacks ---
+  1. Missing video or audio files → segment silently skipped
+  2. No segments at all → RuntimeError raised
+
+--- Pipeline-Level Error Handling ---
+  All three pipeline entry points (run_pipeline, run_reannotate,
+  run_from_script) wrap their entire body in try/except Exception.
+  On failure, the task is marked as "failed" with the error message.
+  The script is saved after each phase, so partial progress is preserved.
+
+--- Frontend Error Handling ---
+  - SSE auto-closes on "failed" status
+  - Upload errors are alerted to the user
+  - Missing scripts/audio return null (gracefully handled)
+  - getScript() returns null instead of throwing on 404
+
+
+================================================================================
+20. KEY DESIGN DECISIONS AND TRADE-OFFS
+================================================================================
+
+1. Audio-first pipeline ordering
+   Voiceover is generated BEFORE animation code. This means the annotator
+   receives real measured audio durations instead of estimates. The cost is
+   that annotation can't influence audio (e.g., adding pauses for visual
+   emphasis), but the benefit (accurate timing) far outweighs this.
+
+2. Full narration TTS instead of per-segment
+   Generating one continuous TTS file and splitting it preserves natural
+   prosody across segment boundaries. Per-segment TTS would create
+   unnatural pauses and inconsistent speaking rhythm.
+
+3. LLM-generated code instead of template translation
+   The annotator writes raw Manim Python code rather than producing
+   structured data that gets translated into code. This gives the LLM
+   maximum creative freedom but means render failures are possible.
+   The title card fallback makes this trade-off acceptable.
+
+4. Claude Opus for annotation, Sonnet for scripting
+   Opus is used for the hardest task (writing correct, creative Manim code)
+   while Sonnet handles the easier task (writing narration text). This
+   balances cost and quality.
+
+5. Sequential annotation, parallel scripting
+   Script sections can be written independently (parallel), but annotations
+   are sequential with 0.5s stagger to respect rate limits and because
+   each segment needs unique visual treatment.
+
+6. Deliberate audio slowdown (0.82x)
+   TTS is run 18% slower than the user-selected speed, and 2 seconds of
+   silence are appended to each segment. This creates generous timing for
+   animations to complete without feeling rushed.
+
+7. In-memory task registry
+   Task state is not persisted. This simplifies the code but means pipeline
+   state is lost on server restart. For a single-user local application,
+   this is acceptable.
+
+8. No authentication or rate limiting
+   The application is designed for single-user local use on Apple Silicon
+   hardware. Adding auth would add complexity without benefit.
+
+9. Low-quality Manim renders (-ql)
+   854x480 at 15fps is fast to render and sufficient for the educational
+   use case. Higher quality would dramatically increase render time.
+
+10. ProcessPoolExecutor with 1 worker
+    Both TTS and Manim rendering use a single worker process. MLX requires
+    its own process (not thread-safe), and parallel Manim renders would
+    cause resource contention. Sequential processing is slower but more
+    reliable.
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================

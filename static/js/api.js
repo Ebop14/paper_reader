@@ -62,6 +62,19 @@ const API = {
         return this._sse(`/api/pipeline/${paperId}/reannotate/stream`, onEvent);
     },
 
+    async startRevoice(paperId, voice, speed) {
+        const res = await fetch(`/api/pipeline/${paperId}/revoice`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ voice, speed }),
+        });
+        return res.json();
+    },
+
+    streamRevoice(paperId, onEvent) {
+        return this._sse(`/api/pipeline/${paperId}/revoice/stream`, onEvent);
+    },
+
     async getScript(paperId) {
         const res = await fetch(`/api/pipeline/${paperId}/script`);
         if (!res.ok) return null;

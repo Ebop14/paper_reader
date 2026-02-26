@@ -1,7 +1,7 @@
 from collections import OrderedDict
 
 from app.models import PaperMeta, PaperSection, ScriptSegment, VideoScript
-from app.storage import papers_dir, scripts_dir, animations_dir, videos_dir
+from app.storage import papers_dir, scripts_dir, audio_dir, animations_dir, videos_dir
 from app.services.scriptwriter_service import write_script
 from app.services.annotator_service import annotate_script
 from app.services.hint_validator import validate_and_repair_hints
@@ -195,6 +195,67 @@ async def run_reannotate(paper_id: str, task_id: str) -> None:
             stage_progress=1.0,
             progress=1.0,
             message="Re-annotation complete",
+        )
+
+    except Exception as e:
+        update_task(task_id, status="failed", message=str(e))
+
+
+def _clear_audio(paper_id: str) -> None:
+    """Remove existing audio and video files so they get re-generated."""
+    import shutil
+    for d in (audio_dir() / paper_id, videos_dir() / paper_id):
+        if d.exists():
+            shutil.rmtree(d)
+
+
+async def run_revoice(
+    paper_id: str,
+    task_id: str,
+    voice: str = "serena",
+    speed: float = 1.0,
+) -> None:
+    """Load existing script, re-generate voiceover with new voice/speed, then re-composite."""
+    try:
+        update_task(task_id, stage="loading", message="Loading script...")
+        script = _load_script(paper_id)
+
+        # Clear old audio and video (keep animations)
+        _clear_audio(paper_id)
+        for seg in script.segments:
+            seg.audio_file = None
+            seg.actual_duration_seconds = None
+        script.actual_total_duration_seconds = None
+        script.video_file = None
+
+        # Re-generate voiceover
+        update_task(
+            task_id,
+            stage="voiceover",
+            stage_progress=0.0,
+            message="Re-generating voiceover...",
+        )
+        script = await generate_voiceover(paper_id, script, voice, speed, task_id)
+        _save_script(paper_id, script)
+
+        # Re-composite with new audio + existing animations
+        update_task(
+            task_id,
+            stage="compositing",
+            stage_progress=0.0,
+            message="Starting video compositing...",
+        )
+        final_video = await composite_video(paper_id, script, task_id)
+        script.video_file = final_video.name
+        _save_script(paper_id, script)
+
+        update_task(
+            task_id,
+            status="completed",
+            stage="done",
+            stage_progress=1.0,
+            progress=1.0,
+            message="Revoice complete",
         )
 
     except Exception as e:

@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from app.models import PipelineRequest
 from app.storage import scripts_dir, audio_dir, exports_dir, animations_dir, videos_dir
-from app.services.director_service import run_pipeline, run_from_script, run_reannotate
+from app.services.director_service import run_pipeline, run_from_script, run_reannotate, run_revoice
 from app.services.audio_service import concat_speech_chunks
 from app.tasks.processing import task_registry, create_task, sse_stream
 
@@ -15,6 +15,7 @@ router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 PIPELINE_STAGES = ["loading", "scripting", "voiceover", "annotating", "animation", "compositing", "done"]
 RENDER_STAGES = ["loading", "animation", "compositing", "done"]
 REANNOTATE_STAGES = ["loading", "annotating", "animation", "compositing", "done"]
+REVOICE_STAGES = ["loading", "voiceover", "compositing", "done"]
 
 
 @router.post("/{paper_id}/start")
@@ -81,6 +82,36 @@ async def start_reannotate(paper_id: str):
 @router.get("/{paper_id}/reannotate/stream")
 async def stream_reannotate(paper_id: str):
     task_id = f"reannotate-{paper_id}"
+    return StreamingResponse(sse_stream(task_id), media_type="text/event-stream")
+
+
+@router.post("/{paper_id}/revoice")
+async def start_revoice(paper_id: str, req: PipelineRequest):
+    """Re-generate voiceover with new voice/speed, keeping existing animations."""
+    task_id = f"revoice-{paper_id}"
+
+    existing = task_registry.get(task_id)
+    if existing and existing["status"] == "running":
+        return {"task_id": task_id, "status": "running"}
+
+    script_path = scripts_dir() / paper_id / "script.json"
+    if not script_path.exists():
+        raise HTTPException(404, "No script found — run the full pipeline first")
+
+    # Verify animations exist
+    anim_dir = animations_dir() / paper_id
+    if not anim_dir.exists() or not list(anim_dir.glob("segment_*.mp4")):
+        raise HTTPException(404, "No animations found — run the full pipeline first")
+
+    create_task(task_id, stages=REVOICE_STAGES)
+
+    asyncio.create_task(run_revoice(paper_id, task_id, req.voice, req.speed))
+    return {"task_id": task_id, "status": "started"}
+
+
+@router.get("/{paper_id}/revoice/stream")
+async def stream_revoice(paper_id: str):
+    task_id = f"revoice-{paper_id}"
     return StreamingResponse(sse_stream(task_id), media_type="text/event-stream")
 
 

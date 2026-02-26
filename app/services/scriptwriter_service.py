@@ -103,8 +103,8 @@ def _get_openai_client() -> openai.AsyncOpenAI:
 def _estimate_duration(text: str, wpm: float = 90.0) -> float:
     """Estimate spoken duration in seconds based on word count.
 
-    Qwen3-TTS speaks at roughly 1.5 words/sec (~90 wpm), much slower
-    than the typical human 150 wpm.  Using 90 wpm gives estimates that
+    Kokoro TTS speaks at roughly 1.5 words/sec (~90 wpm) at 0.85× speed,
+    slower than typical human 150 wpm.  Using 90 wpm gives estimates that
     match actual TTS output so downstream animation timing is accurate.
     """
     words = len(text.split())

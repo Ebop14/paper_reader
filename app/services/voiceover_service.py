@@ -28,7 +28,7 @@ async def generate_voiceover(
     Audio is deliberately slowed (speed * 0.82) for a measured narration pace.
     """
     # Slow TTS down so animations have time to breathe
-    effective_speed = speed * 0.82
+    effective_speed = speed * 0.85
     total = len(script.segments)
     out_dir = audio_dir() / paper_id
     out_dir.mkdir(parents=True, exist_ok=True)

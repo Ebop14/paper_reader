@@ -5,7 +5,8 @@ from pathlib import Path
 class Settings(BaseSettings):
     anthropic_api_key: str = ""
     openai_api_key: str = ""
-    tts_model: str = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"
+    kokoro_model_path: str = "data/models/kokoro-v1.0.onnx"
+    kokoro_voices_path: str = "data/models/voices-v1.0.bin"
     tts_workers: int = 1
     musicgen_model: str = "facebook/musicgen-small"
     host: str = "0.0.0.0"

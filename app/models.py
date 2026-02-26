@@ -23,7 +23,7 @@ class ProcessRequest(BaseModel):
 
 class TTSRequest(BaseModel):
     paper_id: str
-    voice: str = "serena"
+    voice: str = "af_heart"
     speed: float = 1.0
 
 
@@ -109,5 +109,5 @@ class VideoScript(BaseModel):
 
 
 class PipelineRequest(BaseModel):
-    voice: str = "serena"
+    voice: str = "af_heart"
     speed: float = 1.0

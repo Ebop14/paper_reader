@@ -39,7 +39,7 @@ def _save_script(paper_id: str, script: VideoScript) -> None:
 async def run_pipeline(
     paper_id: str,
     task_id: str,
-    voice: str = "serena",
+    voice: str = "af_heart",
     speed: float = 1.0,
 ) -> None:
     """Orchestrate the full pipeline: script generation -> voiceover."""
@@ -212,7 +212,7 @@ def _clear_audio(paper_id: str) -> None:
 async def run_revoice(
     paper_id: str,
     task_id: str,
-    voice: str = "serena",
+    voice: str = "af_heart",
     speed: float = 1.0,
 ) -> None:
     """Load existing script, re-generate voiceover with new voice/speed, then re-composite."""

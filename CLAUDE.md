@@ -1,6 +1,6 @@
 # Paper Reader
 
-Upload academic PDFs, generate video scripts with Claude (parallel scriptwriting + aggregation), convert to voiceover with Qwen3-TTS via MLX on Apple Silicon, render Manim animations per segment (LLM-generated scene code), composite into final MP4 with ffmpeg, and play back with segment-level navigation.
+Upload academic PDFs, generate video scripts with Claude (parallel scriptwriting + aggregation), convert to voiceover with Kokoro TTS (ONNX-based, 82M params), render Manim animations per segment (LLM-generated scene code), composite into final MP4 with ffmpeg, and play back with segment-level navigation.
 
 ## Quick Start
 
@@ -10,7 +10,7 @@ cp .env.example .env   # set ANTHROPIC_API_KEY
 python run.py           # http://localhost:8000
 ```
 
-Requires `brew install ffmpeg` for MP3/MP4 export, `brew install py3cairo pango` for Manim, and `brew install --cask basictex` for LaTeX. Note: LaTeX is currently unreliable (missing `standalone.cls`); the annotator prompt bans MathTex/Tex/BarChart and uses Text() with Unicode instead. Python venv already set up in `.venv/`.
+Requires `brew install ffmpeg` for MP3/MP4 export, `brew install py3cairo pango` for Manim, `brew install espeak-ng` for Kokoro TTS phonemizer, and `brew install --cask basictex` for LaTeX. Note: LaTeX is currently unreliable (missing `standalone.cls`); the annotator prompt bans MathTex/Tex/BarChart and uses Text() with Unicode instead. Python venv already set up in `.venv/`. Kokoro model files (~300MB + ~256MB) auto-download to `data/models/` on first TTS request.
 
 ## Architecture
 
@@ -32,7 +32,7 @@ app/
 ├── services/
 │   ├── pdf_service.py   # PyMuPDF text extraction, section detection, sentence-boundary chunking
 │   ├── llm_service.py   # Claude API (async streaming, prompt caching, verbatim/narrated modes)
-│   ├── tts_service.py   # mlx-audio wrapper (ProcessPoolExecutor, lazy model load)
+│   ├── tts_service.py   # kokoro-onnx wrapper (ProcessPoolExecutor, lazy model load, auto-download)
 │   ├── audio_service.py # pydub concat + overlay + MP3 export
 │   ├── director_service.py    # Pipeline orchestrator (load → script → annotate → voiceover → animation → compositing → save)
 │   ├── scriptwriter_service.py # Parallel Claude scriptwriting + aggregation (narration only, no animation hints)
@@ -70,11 +70,11 @@ data/                    # Runtime storage, gitignored
 2. **Generate Video** (pipeline) →
    - `director_service.run_pipeline()` orchestrates all phases
    - Phase 1: Load paper meta, group sections by title
-   - Phase 2: `scriptwriter_service.write_script()` — parallel Claude calls per section group, then aggregator adds intro/outro/transitions → `VideoScript` with narration only (empty animation_hints). Duration estimated at 90 wpm to match Qwen3-TTS speaking rate.
-   - Phase 2b: `voiceover_service.generate_voiceover()` — TTS via `tts_service.generate_chunk()` at 0.82× speed for slower narration, measures actual durations with pydub, appends 2s silence tail per segment. Runs BEFORE annotation so the annotator gets real audio durations.
+   - Phase 2: `scriptwriter_service.write_script()` — parallel Claude calls per section group, then aggregator adds intro/outro/transitions → `VideoScript` with narration only (empty animation_hints). Duration estimated at 90 wpm to match Kokoro TTS speaking rate.
+   - Phase 2b: `voiceover_service.generate_voiceover()` — TTS via `tts_service.generate_chunk()` at 0.85× speed for slower narration, measures actual durations with pydub. Full narration generated as one audio file then split by word-count proportion. Runs BEFORE annotation so the annotator gets real audio durations.
    - Phase 2c: `annotator_service.annotate_script()` — Claude Opus generates complete Manim `construct()` body per segment using actual audio durations, stored in `segment.manim_code`. Minimal `animation_hints` kept for UI badge display only.
    - Phase 2d: `hint_validator.validate_and_repair_hints()` — validates display hints (not used for rendering)
-   - Phase 4: `animation_orchestrator.generate_animations()` — sequential Manim render per segment via `animation_service.render_segment()`. Uses `segment.manim_code` directly when present; falls back to title card on render failure.
+   - Phase 4: `animation_orchestrator.generate_animations()` — sequential Manim render per segment. On render failure, feeds the failed code + error back to the annotator LLM for up to 2 fix attempts before falling back to a title card.
    - Phase 5: `compositor_service.composite_video()` — ffmpeg mux per segment (video loops to fill audio duration), then concat into final MP4
    - Script saved to `data/scripts/{id}/script.json` after each phase
 3. **Re-render Video** → `director_service.run_from_script()` loads existing script, clears old animation/video files, runs Phase 4 + Phase 5 only. Triggered via `POST /api/pipeline/{id}/render`.
@@ -116,18 +116,18 @@ data/                    # Runtime storage, gitignored
 - **LLM-generated Manim code**: `annotator_service` uses Claude Opus (`claude-opus-4-20250514`) to write complete Manim `construct()` body code per segment. The LLM receives narration text, paper source data, and target duration, then writes Python code using the Manim Community Edition API (v0.20.0). The system prompt bans LaTeX-dependent features (MathTex, Tex, BarChart, include_numbers, add_coordinates) since `standalone.cls` is missing; all text uses `Text()` with Unicode. It also bans `GrowArrow` on `CurvedArrow` (hangs), `Sector(outer_radius=)` (TypeError), and non-existent color variants like `ORANGE_C` (NameError). Code is stored in `segment.manim_code` and rendered directly.
 - **Animation rendering**: `animation_service` wraps LLM-generated code in a `Scene` class and renders via Manim CLI in a `ProcessPoolExecutor(1)`. On render failure, falls back to a simple title card. No template translation layer — the LLM writes the scene code end-to-end.
 - **Video compositing with loop**: `compositor_service` uses `-stream_loop -1` to loop the animation video indefinitely, then `-shortest` trims to audio length. This ensures the full voiceover is preserved even when animations are shorter than speech. Re-encodes with `libx264 -preset ultrafast -crf 28`.
-- **Audio-first duration flow**: Voiceover is generated before annotation. TTS runs at 0.82× speed for slower narration, and each segment gets 2s of silence padding. The annotator receives `actual_duration_seconds` (measured from real audio) instead of the 90 wpm estimate, ensuring animations are timed to match the actual audio.
+- **Audio-first duration flow**: Voiceover is generated before annotation. TTS runs at 0.85× speed for slower narration. The annotator receives `actual_duration_seconds` (measured from real audio) instead of the 90 wpm estimate, ensuring animations are timed to match the actual audio.
 - **Parallel scriptwriting**: `scriptwriter_service` fans out one `asyncio.create_task` per section group (e.g. Abstract, Methods, Results each get their own Claude call). Results awaited in order for progress tracking. Aggregator pass adds intro/outro/transitions.
 - **JSON parse retry**: Scriptwriter/aggregator Claude calls attempt to parse JSON from the response. On failure, retry once with prefilled assistant response (`[`). On second failure, fall back gracefully (raw segments, single fallback segment).
 - **Paper deletion**: `DELETE /api/papers/{id}` removes all data across 7 directories (papers, processed, audio, scripts, animations, videos, exports). Frontend confirms with user, clears active state if the deleted paper was selected.
 - **Animation browser**: After pipeline completion or re-render, the right panel shows an animation browser with prev/next navigation to cycle through individual segment MP4s. Highlights the corresponding script card in the center panel.
 - **Hint validation (display only)**: `hint_validator` still runs for UI badge display but no longer drives rendering. Validates mobject_type, action, and color whitelists; repairs empty step targets; ensures minimum 2 hints per segment.
 - **Async background tasks**: Pipeline, LLM, and TTS processing run via `asyncio.create_task()`. Progress tracked in `task_registry` dict, streamed to frontend via SSE (0.5s polling in `sse_stream()`).
-- **TTS concurrency**: `ProcessPoolExecutor` with 1 worker (MLX needs its own process). Sync generation runs in `run_in_executor()`.
-- **Lazy model loading**: TTS model loaded on first request, not at startup. Uses `mlx_audio.tts.load_model()`.
+- **TTS concurrency**: `ProcessPoolExecutor` with 1 worker (ONNX runtime benefits from process isolation). Sync generation runs in `run_in_executor()`.
+- **Lazy model loading**: TTS model loaded on first request, not at startup. Auto-downloads from GitHub releases if files missing.
 - **Prompt caching**: Claude system prompts use `cache_control: {"type": "ephemeral"}` for cost reduction across chunks.
 - **Progressive playback**: Frontend shows player as soon as first TTS chunk generates; refreshes chunk list during voiceover generation.
-- **mlx-audio API**: Uses `generate_audio()` (not `generate_speech`). Key params: `model` (nn.Module), `output_path` (directory), `file_prefix` (stem), `join_audio=True`.
+- **kokoro-onnx API**: Uses `Kokoro(model_path, voices_path)` then `kokoro.create(text, voice, speed, lang)` → returns `(samples, sample_rate)`. Output written with `soundfile.write()` at 24kHz.
 
 ## Known Limitations
 
@@ -143,7 +143,8 @@ data/                    # Runtime storage, gitignored
 - `anthropic` — Claude API (async streaming, Opus for animation, Sonnet for scripting)
 - `openai` — OpenAI API (fallback for scriptwriter)
 - `PyMuPDF` (imported as `fitz`) — PDF text extraction
-- `mlx-audio` — on-device TTS via Apple MLX (`mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit`)
+- `kokoro-onnx` — on-device TTS via ONNX Runtime (82M param Kokoro model, auto-downloaded to `data/models/`)
+- `soundfile` — WAV file writing for TTS output
 - `pydub` — audio manipulation (requires ffmpeg system dependency)
 - `manim` v0.20.0 — programmatic math/science animations (renders MP4 segments)
 - `pydantic-settings` — config from `.env`

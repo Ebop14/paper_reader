@@ -63,12 +63,11 @@ The pipeline transforms a PDF into a video through six sequential phases:
     durations at 90 wpm, visual strategy hints — but NO animation code yet).
     |
     v
-  [Phase 2b] VOICEOVER GENERATION  (TTS Agent: Qwen3-TTS via MLX)
-    The full narration is synthesized as one continuous audio file at 0.82x
+  [Phase 2b] VOICEOVER GENERATION  (TTS Agent: Kokoro TTS via ONNX Runtime)
+    The full narration is synthesized as one continuous audio file at 0.85x
     speed (deliberately slow for animation breathing room), then split into
-    per-segment WAV clips by word-count proportional timing. Each clip gets
-    2 seconds of trailing silence appended. Actual durations are measured
-    from the real audio and written back into the script.
+    per-segment WAV clips by word-count proportional timing. Actual durations
+    are measured from the real audio and written back into the script.
     Output: Per-segment WAV files, actual_duration_seconds on each segment.
     |
     v
@@ -122,7 +121,8 @@ Backend:
   - Anthropic Python SDK (async streaming) for Claude API calls
   - OpenAI Python SDK (async) as fallback for scriptwriting
   - PyMuPDF (fitz) for PDF text extraction
-  - mlx-audio for on-device TTS on Apple Silicon (Qwen3-TTS model)
+  - kokoro-onnx for on-device TTS via ONNX Runtime (Kokoro 82M param model)
+  - soundfile for WAV writing
   - Manim Community Edition v0.20.0 for programmatic animations
   - pydub for audio manipulation (WAV splitting, silence padding, MP3 export)
   - ffmpeg / ffprobe for video muxing and concatenation
@@ -163,7 +163,7 @@ Source code layout:
   │   ├── scriptwriter_service.py  Parallel scriptwriting + aggregation
   │   ├── annotator_service.py   Manim code generation agent (Claude Opus)
   │   ├── voiceover_service.py   TTS wrapper with duration measurement
-  │   ├── tts_service.py         mlx-audio wrapper (ProcessPoolExecutor)
+  │   ├── tts_service.py         kokoro-onnx wrapper (ProcessPoolExecutor, auto-download)
   │   ├── hint_validator.py      Animation hint validation/repair
   │   ├── animation_service.py   Manim renderer (ProcessPoolExecutor)
   │   ├── animation_orchestrator.py  Iterates segments, renders animations
@@ -351,8 +351,8 @@ Fallback chain for aggregation:
 After aggregation, the scriptwriter:
   - Hard-caps at MAX_SEGMENTS = 18
   - Estimates duration for each segment using _estimate_duration() at 90 wpm
-    (because Qwen3-TTS speaks at ~1.5 words/sec, much slower than human
-    speech at ~2.5 words/sec)
+    (because Kokoro TTS at 0.85x speed speaks at ~1.5 words/sec, much slower
+    than human speech at ~2.5 words/sec)
   - Constructs ScriptSegment objects with empty animation_hints and
     empty manim_code
   - Returns a VideoScript
@@ -372,7 +372,10 @@ what the annotator actually uses.
 File: app/services/voiceover_service.py
 Worker: app/services/tts_service.py
 Orchestrated by: director_service.run_pipeline()
-Model: Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit via mlx-audio on Apple Silicon
+Model: Kokoro TTS (82M params) via kokoro-onnx / ONNX Runtime
+Model files: kokoro-v1.0.onnx (~300MB) + voices-v1.0.bin (~256MB)
+Auto-downloaded to data/models/ on first use from GitHub releases.
+System dependency: espeak-ng (brew install espeak-ng) for phonemizer.
 
 CRITICAL DESIGN DECISION: Voiceover runs BEFORE animation code generation.
 This means the annotator (Phase 2c) receives real measured audio durations
@@ -381,12 +384,12 @@ animations are timed correctly to match the actual speech.
 
 --- Speed Adjustment ---
 
-The user-selected speed (default 1.0) is multiplied by 0.82:
-  effective_speed = speed * 0.82
+The user-selected speed (default 1.0) is multiplied by 0.85:
+  effective_speed = speed * 0.85
 
-This deliberately slows the TTS output by ~18%, giving animations more time
+This deliberately slows the TTS output by ~15%, giving animations more time
 to play and creating a more relaxed viewing experience. At the default speed
-of 1.0, the effective TTS speed is 0.82x.
+of 1.0, the effective TTS speed is 0.85x.
 
 --- Pass 1: Full Narration TTS ---
 
@@ -399,22 +402,21 @@ segment boundaries), the voiceover service:
   3. This gives the TTS model full context for natural prosody
 
 The TTS call goes through tts_service.generate_chunk(), which runs the
-MLX model in a ProcessPoolExecutor with 1 worker (MLX is not thread-safe;
-each process gets its own Metal context on Apple Silicon).
+Kokoro model in a ProcessPoolExecutor with 1 worker (ONNX runtime benefits
+from process isolation to avoid blocking the event loop).
 
-The mlx-audio API call:
-  generate_audio(
-    text=full_narration,
-    model=_worker_model,         # Loaded once per worker process
-    voice=voice,                 # e.g., "serena"
-    speed=effective_speed,       # 0.82x default
-    output_path=out_dir,
-    file_prefix="full_narration",
-    audio_format="wav",
-    join_audio=True,
-    play=False,
-    verbose=False,
+The kokoro-onnx API call:
+  # In worker process (loaded once via _init_worker):
+  kokoro = Kokoro(model_path, voices_path)
+
+  # Per generation call:
+  samples, sample_rate = kokoro.create(
+    text,                        # Full narration text
+    voice=voice,                 # e.g., "af_heart"
+    speed=effective_speed,       # 0.85x default
+    lang="en-us",
   )
+  soundfile.write(out_path, samples, sample_rate)  # 24kHz WAV
 
 --- Pass 2: Split into Per-Segment Clips ---
 
@@ -424,20 +426,19 @@ The full narration WAV is loaded with pydub and split proportionally:
   2. Slice that proportion of the total audio duration:
        seg_dur_ms = int(proportion * total_duration_ms)
   3. The last segment gets all remaining audio (absorbs rounding drift)
-  4. Append 2 seconds of silence to each segment clip:
-       seg_audio = seg_audio + AudioSegment.silent(duration=2000)
-     This trailing silence gives animations time to complete their final
-     fade-out without the compositor freezing on a mid-animation frame.
-  5. Export each clip as chunk_NNNN.wav
-  6. Measure actual duration: segment.actual_duration_seconds = len(seg_audio) / 1000.0
+  4. Export each clip as chunk_NNNN.wav
+  5. Measure actual duration: segment.actual_duration_seconds = len(seg_audio) / 1000.0
 
 After splitting, the full narration file is deleted to save disk space.
 
 The actual_total_duration_seconds is computed as the sum of all segment
 actual durations. This is the authoritative total video length.
 
-Available voices: serena, vivian, ryan, aiden, eric, dylan, sohee, ono_anna,
-uncle_fu. These are Qwen3-TTS voice presets.
+Available voices (Kokoro presets):
+  American English Female: af_heart, af_bella, af_nicole, af_sarah, af_nova, af_sky
+  American English Male: am_adam, am_michael, am_echo
+  British English Female: bf_emma, bf_isabella
+  British English Male: bm_daniel, bm_george
 
 
 ================================================================================
@@ -575,8 +576,8 @@ The tool execution function _execute_compile_tool():
     used later by Phase 4, max_workers=1)
   - If paper_id and segment_index are provided (normal path), the output
     MP4 is written directly to data/animations/{paper_id}/segment_NNNN.mp4
-  - This means Phase 4's render_segment() will find the file already exists
-    and skip rendering entirely (line 181: if output_path.exists(): return)
+  - This means Phase 4's render_manim_code() will find the file already
+    exists and return immediately (output_path.exists() → return path, None)
   - On render error, the exception message is captured and returned to Claude
 
 --- Caching Behavior ---
@@ -587,7 +588,7 @@ tool. This eliminates redundant work in Phase 4:
   During annotation (Phase 2c):
     compile_manim succeeds → MP4 written to data/animations/{paper_id}/
   During rendering (Phase 4):
-    render_segment() checks if output_path.exists() → returns immediately
+    render_manim_code() checks if output_path.exists() → returns immediately
 
 Cache invalidation:
   - run_pipeline(): No prior animations exist, so no stale cache conflicts
@@ -646,58 +647,75 @@ Orchestrated by: director_service.run_pipeline()
 animation_orchestrator.generate_animations() iterates segments sequentially:
   1. For each segment, resolve duration:
      actual_duration_seconds > estimated_duration_seconds > 5.0 (fallback)
-  2. Call animation_service.render_segment()
-  3. Set segment.animation_file = mp4_path.name
+  2. Call animation_service.render_manim_code() to attempt rendering
+  3. On render failure, feed the failed code + error message back to the
+     annotator LLM (annotate_segment with previous_code/previous_error)
+     for up to MAX_RENDER_RETRIES=2 fix attempts
+  4. If all retries fail, call animation_service.render_title_card()
+  5. Set segment.animation_file = mp4_path.name
+  6. If code was fixed during retry, update segment.manim_code
 
 --- The Renderer ---
 
-animation_service.render_segment() has two paths:
+animation_service exposes two async functions:
 
-  Primary path (LLM-generated code):
-  1. If segment.manim_code is non-empty:
-     a. Normalize indentation: LLMs sometimes return code with 0-space or
-        4-space indentation instead of the required 8-space. The normalizer
-        finds the modal (most common) indent level across all lines and
-        shifts all lines so that modal becomes 8 spaces.
-     b. Wrap in a Scene class:
-          from manim import *
-          class SegmentScene(Scene):
-              def construct(self):
-                  {normalized code}
-     c. Write to a temporary scene.py file
-     d. Run Manim CLI as a subprocess:
-          manim render scene.py SegmentScene -ql --format mp4
-            --media_dir {tmpdir} --disable_caching
-        - -ql = low quality (854x480, 15fps) for speed
-        - --disable_caching prevents stale cache from skipping re-renders
-        - 180 second timeout
-     e. Find the rendered MP4 in the temp directory (rglob("*.mp4"))
-     f. Copy to data/animations/{paper_id}/segment_NNNN.mp4
+  render_manim_code(paper_id, segment_index, manim_code):
+    Returns (output_path, error_or_None).
+    1. If segment.manim_code is non-empty:
+       a. Normalize indentation: LLMs sometimes return code with 0-space or
+          4-space indentation instead of the required 8-space. The normalizer
+          finds the modal (most common) indent level across all lines and
+          shifts all lines so that modal becomes 8 spaces.
+       b. Wrap in a Scene class:
+            from manim import *
+            class SegmentScene(Scene):
+                def construct(self):
+                    {normalized code}
+       c. Write to a temporary scene.py file
+       d. Run Manim CLI as a subprocess:
+            manim render scene.py SegmentScene -ql --format mp4
+              --media_dir {tmpdir} --disable_caching
+          - -ql = low quality (854x480, 15fps) for speed
+          - --disable_caching prevents stale cache from skipping re-renders
+          - 180 second timeout
+       e. Find the rendered MP4 in the temp directory (rglob("*.mp4"))
+       f. Copy to data/animations/{paper_id}/segment_NNNN.mp4
+    2. On success, returns (path, None)
+    3. On failure, returns (path, error_string) — the orchestrator uses the
+       error string for LLM retry context
 
-  Fallback path (title card):
-  If the primary path fails (render error, timeout, empty code), a simple
-  title card is rendered instead:
-    title = Text("{section_title}", font_size=36)
-    self.play(FadeIn(title), run_time=1.0)
-    self.wait({duration - 2.0})
-    self.play(FadeOut(title), run_time=1.0)
+  render_title_card(paper_id, segment_index, section_title, duration):
+    Always succeeds. Renders a simple title card:
+      title = Text("{section_title}", font_size=36)
+      self.play(FadeIn(title), run_time=1.0)
+      self.wait({duration - 2.0})
+      self.play(FadeOut(title), run_time=1.0)
 
 The renderer uses a ProcessPoolExecutor with max_workers=1. This is because
 Manim rendering is CPU-intensive and memory-heavy, and running multiple
 renders in parallel on a single machine would cause thrashing.
 
+--- Render-time retry with error context ---
+
+When a render fails in Phase 4, the orchestrator calls annotate_segment()
+with previous_code and previous_error parameters. The annotator LLM receives
+the failed code and the Manim stderr in its prompt, allowing it to diagnose
+and fix the issue (e.g., a runtime error that wasn't caught during the
+compile-tool check in Phase 2c). Up to 2 retry attempts are made before
+falling back to a title card.
+
 --- Pre-compilation in Phase 2c ---
 
-As of the compile-tool update, the annotator agent (Phase 2c) now pre-compiles
-code during generation via the compile_manim tool. This means most segments
-arrive at Phase 4 with a cached MP4 already on disk. render_segment() checks
-if output_path.exists() (line 181) and returns immediately for these segments.
+The annotator agent (Phase 2c) pre-compiles code during generation via the
+compile_manim tool. This means most segments arrive at Phase 4 with a cached
+MP4 already on disk. render_manim_code() checks if output_path.exists() and
+returns immediately (with error=None) for these segments.
 
 Segments that failed all 3 compile attempts during Phase 2c still carry their
 last-attempt code in segment.manim_code. Phase 4 tries to render this code
-one more time (different process, clean state), falling back to the title card
-if it still fails. This double-attempt approach maximizes success rate while
-keeping the title card as an ultimate safety net.
+and, on failure, sends it back to the annotator with the error for a fresh
+fix attempt. This multi-layer approach maximizes success rate while keeping
+the title card as an ultimate safety net.
 
 
 ================================================================================
@@ -1049,7 +1067,8 @@ Configuration is managed via pydantic-settings, reading from a .env file:
 
   ANTHROPIC_API_KEY    Required. Used for all Claude API calls.
   OPENAI_API_KEY       Optional. Used as fallback for scriptwriting.
-  TTS_MODEL            Default: "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"
+  KOKORO_MODEL_PATH    Default: "data/models/kokoro-v1.0.onnx"
+  KOKORO_VOICES_PATH   Default: "data/models/voices-v1.0.bin"
   TTS_WORKERS          Default: 1 (ProcessPoolExecutor workers for TTS)
   MUSICGEN_MODEL       Default: "facebook/musicgen-small" (unused currently)
   HOST                 Default: "0.0.0.0"

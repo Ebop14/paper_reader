@@ -161,50 +161,57 @@ def _title_card_code(title: str, duration: float) -> str:
 # Async API
 # =====================================================================
 
-async def render_segment(
+async def render_manim_code(
     paper_id: str,
     segment_index: int,
-    hints: list[AnimationHint],
-    section_title: str,
-    duration: float,
-    manim_code: str = "",
-) -> Path:
-    """Render animation for a single segment. Returns path to MP4 file.
+    manim_code: str,
+) -> tuple[Path, str | None]:
+    """Try to render manim_code. Returns (output_path, error_or_None).
 
-    If manim_code is provided, uses it directly as the construct() body.
-    Otherwise falls back to a title card.
+    On success the MP4 exists at output_path and error is None.
+    On failure the MP4 does NOT exist and error contains the stderr.
     """
     out_dir = animations_dir() / paper_id
     out_dir.mkdir(parents=True, exist_ok=True)
     output_path = out_dir / f"segment_{segment_index:04d}.mp4"
 
     if output_path.exists():
-        return output_path
+        return output_path, None
 
+    scene_code = _wrap_scene(manim_code)
     loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(
+            _get_executor(),
+            functools.partial(
+                _render_scene_sync,
+                scene_code=scene_code,
+                output_path=str(output_path),
+            ),
+        )
+        return output_path, None
+    except Exception as exc:
+        error_msg = str(exc)
+        logger.error(
+            "Segment %d render failed: %s", segment_index, error_msg[:300],
+        )
+        return output_path, error_msg
 
-    # Primary path: use LLM-generated Manim code
-    if manim_code.strip():
-        scene_code = _wrap_scene(manim_code)
-        try:
-            await loop.run_in_executor(
-                _get_executor(),
-                functools.partial(
-                    _render_scene_sync,
-                    scene_code=scene_code,
-                    output_path=str(output_path),
-                ),
-            )
-            return output_path
-        except Exception as exc:
-            logger.error(
-                "Segment %d render failed, falling back to title card: %s",
-                segment_index, exc,
-            )
 
-    # Fallback: title card
+async def render_title_card(
+    paper_id: str,
+    segment_index: int,
+    section_title: str,
+    duration: float,
+) -> Path:
+    """Render a simple title card fallback. Always succeeds."""
+    out_dir = animations_dir() / paper_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = out_dir / f"segment_{segment_index:04d}.mp4"
+
     fallback_code = _title_card_code(section_title, duration)
     scene_code = _wrap_scene(fallback_code)
+    loop = asyncio.get_event_loop()
     await loop.run_in_executor(
         _get_executor(),
         functools.partial(
@@ -213,5 +220,4 @@ async def render_segment(
             output_path=str(output_path),
         ),
     )
-
     return output_path

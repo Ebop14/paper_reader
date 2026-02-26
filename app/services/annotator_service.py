@@ -321,8 +321,14 @@ async def _generate_manim_code(
     visual_strategy: str = "",
     paper_id: str | None = None,
     segment_index: int | None = None,
+    previous_code: str = "",
+    previous_error: str = "",
 ) -> str:
-    """Call Claude with compile_manim tool to generate verified Manim code."""
+    """Call Claude with compile_manim tool to generate verified Manim code.
+
+    If previous_code and previous_error are provided, this is a retry —
+    the prompt includes the failed code and error for context.
+    """
     client = _get_client()
 
     content = (
@@ -334,10 +340,23 @@ async def _generate_manim_code(
     )
     if speaker_notes:
         content += f"### Speaker notes (visual intent from the writer)\n{speaker_notes}\n\n"
-    content += (
-        f"### Paper source text (use real data from here)\n"
-        f"{paper_source_text[:6000]}\n"
-    )
+    if paper_source_text:
+        content += (
+            f"### Paper source text (use real data from here)\n"
+            f"{paper_source_text[:6000]}\n\n"
+        )
+    if previous_code and previous_error:
+        # Truncate error to avoid blowing up context
+        truncated_error = previous_error[:2000]
+        content += (
+            f"### PREVIOUS ATTEMPT (failed at render time)\n"
+            f"The following code compiled but FAILED during rendering. "
+            f"Fix the error while keeping the same visual intent.\n\n"
+            f"```python\n{previous_code}\n```\n\n"
+            f"### RENDER ERROR\n```\n{truncated_error}\n```\n"
+        )
+    elif not paper_source_text:
+        content += "### Paper source text\n(not available for this retry)\n"
 
     messages = [{"role": "user", "content": content}]
     last_code = ""
@@ -443,8 +462,13 @@ async def annotate_segment(
     visual_strategy: str = "",
     paper_id: str | None = None,
     segment_index: int | None = None,
+    previous_code: str = "",
+    previous_error: str = "",
 ) -> tuple[str, list[AnimationHint]]:
     """Generate Manim code and minimal display hints for a single segment.
+
+    If previous_code and previous_error are provided, this is a retry after
+    a render failure — the LLM receives the failed code and error as context.
 
     Returns:
         (manim_code, animation_hints) where manim_code is the construct() body
@@ -454,6 +478,7 @@ async def annotate_segment(
         narration_text, section_title, paper_source_text, duration,
         speaker_notes=speaker_notes, visual_strategy=visual_strategy,
         paper_id=paper_id, segment_index=segment_index,
+        previous_code=previous_code, previous_error=previous_error,
     )
 
     # Create a minimal hint for UI badge display

@@ -1,12 +1,14 @@
-"""Manim code generation agent.
+"""Manim code generation agent with compile-and-fix loop.
 
 Reads each segment's narration + original paper source text and generates
-complete Manim construct() body code.  Runs as a separate LLM pass after
-the scriptwriter so that narration quality and visual richness are
-independently optimised.
+complete Manim construct() body code.  Uses a tool-use agentic loop so Claude
+can compile its code, read errors, and fix them before submitting.
 """
 
 import asyncio
+import functools
+import json
+import logging
 import re
 
 import anthropic
@@ -16,7 +18,38 @@ from app.models import (
     AnimationHint,
     PaperMeta, PaperSection, VideoScript,
 )
+from app.services.animation_service import (
+    _get_executor, _render_scene_sync, _wrap_scene,
+)
+from app.storage import animations_dir
 from app.tasks.processing import update_task
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+MAX_COMPILE_ATTEMPTS = 3
+
+COMPILE_TOOL = {
+    "name": "compile_manim",
+    "description": (
+        "Compile and render a Manim construct() body to verify it works. "
+        "Pass the complete method body (indented with 8 spaces). "
+        "Returns {\"success\": true} or {\"success\": false, \"error\": \"...\"}."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "construct_body": {
+                "type": "string",
+                "description": "The complete construct() method body code.",
+            },
+        },
+        "required": ["construct_body"],
+    },
+}
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -185,7 +218,15 @@ Your animations will likely finish before the voiceover ends. The compositor wil
 - Use REAL DATA from the paper: actual equations, actual numbers, actual method names, actual results
 - Create rich visuals — diagrams, flow charts, annotated equations, data visualizations — NOT just text cards
 - Group related animations with VGroup for clean transitions
-- Use LaggedStart for lists and sequential reveals"""
+- Use LaggedStart for lists and sequential reveals
+
+## Compilation verification
+You have access to a `compile_manim` tool. You MUST call it to test your code before finalizing your response. Workflow:
+1. Write your construct() body code.
+2. Call `compile_manim` with the code to test it.
+3. If compilation fails, read the error message, fix the code, and try again.
+4. Only submit your final response (the raw code, no fences) after a successful compilation.
+5. If all compilation attempts fail, submit your best-effort code anyway — but try hard to fix errors first."""
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +263,53 @@ def _make_title_card_code(section_title: str, duration: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# LLM call
+# Compile tool execution
+# ---------------------------------------------------------------------------
+
+async def _execute_compile_tool(
+    construct_body: str,
+    paper_id: str | None = None,
+    segment_index: int | None = None,
+) -> dict:
+    """Compile Manim code and return success/error result.
+
+    If paper_id and segment_index are provided, a successful render writes
+    the MP4 directly to the final animations path (caching for later phase).
+    """
+    scene_code = _wrap_scene(construct_body)
+
+    # Determine output path
+    if paper_id is not None and segment_index is not None:
+        out_dir = animations_dir() / paper_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        output_path = str(out_dir / f"segment_{segment_index:04d}.mp4")
+    else:
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        output_path = tmp.name
+        tmp.close()
+
+    loop = asyncio.get_event_loop()
+    try:
+        await loop.run_in_executor(
+            _get_executor(),
+            functools.partial(
+                _render_scene_sync,
+                scene_code=scene_code,
+                output_path=output_path,
+            ),
+        )
+        return {"success": True}
+    except Exception as exc:
+        error_msg = str(exc)
+        # Truncate long error messages
+        if len(error_msg) > 1500:
+            error_msg = error_msg[:1500] + "..."
+        return {"success": False, "error": error_msg}
+
+
+# ---------------------------------------------------------------------------
+# LLM call with tool-use agentic loop
 # ---------------------------------------------------------------------------
 
 async def _generate_manim_code(
@@ -232,8 +319,10 @@ async def _generate_manim_code(
     duration: float,
     speaker_notes: str = "",
     visual_strategy: str = "",
+    paper_id: str | None = None,
+    segment_index: int | None = None,
 ) -> str:
-    """Call Claude to generate Manim construct() body for one segment."""
+    """Call Claude with compile_manim tool to generate verified Manim code."""
     client = _get_client()
 
     content = (
@@ -250,29 +339,95 @@ async def _generate_manim_code(
         f"{paper_source_text[:6000]}\n"
     )
 
-    result = ""
-    async with client.messages.stream(
-        model="claude-opus-4-20250514",
-        max_tokens=8192,
-        system=[{
-            "type": "text",
-            "text": ANIMATOR_SYSTEM,
-            "cache_control": {"type": "ephemeral"},
-        }],
-        messages=[{"role": "user", "content": content}],
-    ) as stream:
-        async for chunk in stream.text_stream:
-            result += chunk
+    messages = [{"role": "user", "content": content}]
+    last_code = ""
+    compile_attempts = 0
 
-    code = _extract_code(result)
-    if not code:
+    for _iteration in range(MAX_COMPILE_ATTEMPTS + 2):  # enough room for attempts + final text
+        response = await client.messages.create(
+            model="claude-opus-4-20250514",
+            max_tokens=8192,
+            system=[{
+                "type": "text",
+                "text": ANIMATOR_SYSTEM,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=messages,
+            tools=[COMPILE_TOOL],
+        )
+
+        # Collect text and tool_use blocks from the response
+        text_parts = []
+        tool_use_block = None
+        for block in response.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+            elif block.type == "tool_use":
+                tool_use_block = block
+
+        if response.stop_reason == "tool_use" and tool_use_block:
+            construct_body = tool_use_block.input.get("construct_body", "")
+            if construct_body:
+                last_code = construct_body
+            compile_attempts += 1
+
+            logger.info(
+                "Segment %s compile attempt %d/%d",
+                segment_index, compile_attempts, MAX_COMPILE_ATTEMPTS,
+            )
+
+            result = await _execute_compile_tool(
+                construct_body, paper_id, segment_index,
+            )
+
+            if result["success"]:
+                logger.info(
+                    "Segment %s compiled successfully on attempt %d",
+                    segment_index, compile_attempts,
+                )
+                return construct_body
+
+            logger.warning(
+                "Segment %s compile attempt %d failed: %s",
+                segment_index, compile_attempts, result.get("error", "")[:200],
+            )
+
+            # If we've exhausted compile attempts, return best effort
+            if compile_attempts >= MAX_COMPILE_ATTEMPTS:
+                logger.warning(
+                    "Segment %s exhausted %d compile attempts, using last code",
+                    segment_index, MAX_COMPILE_ATTEMPTS,
+                )
+                return last_code
+
+            # Append the assistant response and tool result for the next iteration
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_block.id,
+                    "content": json.dumps(result),
+                }],
+            })
+            continue
+
+        # stop_reason == "end_turn": Claude finished without using the tool
+        full_text = "\n".join(text_parts)
+        code = _extract_code(full_text)
+        if code:
+            last_code = code
+
+        break
+
+    if not last_code:
         return _make_title_card_code(section_title, duration)
 
     # Basic validation: must contain self.play or self.wait
-    if "self.play" not in code and "self.wait" not in code and "self.add" not in code:
+    if "self.play" not in last_code and "self.wait" not in last_code and "self.add" not in last_code:
         return _make_title_card_code(section_title, duration)
 
-    return code
+    return last_code
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +441,8 @@ async def annotate_segment(
     duration: float = 20.0,
     speaker_notes: str = "",
     visual_strategy: str = "",
+    paper_id: str | None = None,
+    segment_index: int | None = None,
 ) -> tuple[str, list[AnimationHint]]:
     """Generate Manim code and minimal display hints for a single segment.
 
@@ -296,6 +453,7 @@ async def annotate_segment(
     code = await _generate_manim_code(
         narration_text, section_title, paper_source_text, duration,
         speaker_notes=speaker_notes, visual_strategy=visual_strategy,
+        paper_id=paper_id, segment_index=segment_index,
     )
 
     # Create a minimal hint for UI badge display
@@ -360,6 +518,8 @@ async def annotate_script(
             duration,
             speaker_notes=segment.speaker_notes,
             visual_strategy=segment.visual_strategy,
+            paper_id=script.paper_id,
+            segment_index=segment.segment_index,
         )
         segment.manim_code = code
         segment.animation_hints = hints

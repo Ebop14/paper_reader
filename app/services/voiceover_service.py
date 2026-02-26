@@ -25,8 +25,7 @@ async def generate_voiceover(
     WAV files using word-count-proportional timing, then measure actual
     durations for downstream animation and compositing.
 
-    Audio is deliberately slowed (speed * 0.82) and each segment gets ~2s of
-    trailing silence so that downstream animations have breathing room.
+    Audio is deliberately slowed (speed * 0.82) for a measured narration pace.
     """
     # Slow TTS down so animations have time to breathe
     effective_speed = speed * 0.82
@@ -80,14 +79,10 @@ async def generate_voiceover(
     )
 
     # ------------------------------------------------------------------
-    # Pass 2: Split full audio into per-segment clips + add silence tail
+    # Pass 2: Split full audio into per-segment clips
     # ------------------------------------------------------------------
     full_audio = AudioSegment.from_wav(str(full_path))
     total_duration_ms = len(full_audio)
-
-    # Silence padding appended to each segment so animations can finish
-    TAIL_SILENCE_MS = 2000
-    silence_tail = AudioSegment.silent(duration=TAIL_SILENCE_MS)
 
     offset_ms = 0
     for i, segment in enumerate(script.segments):
@@ -99,9 +94,6 @@ async def generate_voiceover(
             seg_audio = full_audio[offset_ms:]
         else:
             seg_audio = full_audio[offset_ms : offset_ms + seg_dur_ms]
-
-        # Append silence so animations have breathing room for fade-outs
-        seg_audio = seg_audio + silence_tail
 
         wav_name = f"chunk_{segment.segment_index:04d}.wav"
         wav_path = out_dir / wav_name

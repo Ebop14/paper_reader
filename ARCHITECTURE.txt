@@ -72,13 +72,17 @@ The pipeline transforms a PDF into a video through six sequential phases:
     Output: Per-segment WAV files, actual_duration_seconds on each segment.
     |
     v
-  [Phase 2c] ANIMATION CODE GENERATION  (LLM Agent: Claude Opus)
+  [Phase 2c] ANIMATION CODE GENERATION  (LLM Agent: Claude Opus + compile tool)
     Claude Opus writes complete Manim Python code (the body of a Scene's
-    construct() method) for each segment. It receives the narration text,
-    the original paper source data, the ACTUAL audio duration (measured in
-    Phase 2b), and a visual strategy hint. The code is stored as a string
-    in segment.manim_code.
-    Output: manim_code field populated on each ScriptSegment.
+    construct() method) for each segment using a tool-use agentic loop. It
+    receives the narration text, the original paper source data, the ACTUAL
+    audio duration (measured in Phase 2b), and a visual strategy hint. Claude
+    has access to a compile_manim tool and MUST call it to test its code.
+    If compilation fails, Claude reads the error, fixes the code, and retries
+    (up to 3 compile attempts). Successfully compiled MP4s are cached directly
+    to data/animations/{paper_id}/ so Phase 4 can skip them.
+    Output: manim_code field populated on each ScriptSegment; pre-compiled
+    MP4s cached in the animations directory.
     |
     v
   [Phase 2d] HINT VALIDATION
@@ -91,7 +95,9 @@ The pipeline transforms a PDF into a video through six sequential phases:
   [Phase 4] ANIMATION RENDERING  (Manim CLI)
     Each segment's manim_code is wrapped in a Scene class and rendered via
     the Manim CLI in a subprocess (ProcessPoolExecutor with 1 worker). On
-    render failure, a simple title card is generated as fallback.
+    render failure, a simple title card is generated as fallback. Segments
+    that were already pre-compiled during Phase 2c are skipped (the MP4
+    already exists on disk).
     Output: Per-segment MP4 files (segment_NNNN.mp4).
     |
     v
@@ -441,10 +447,13 @@ uncle_fu. These are Qwen3-TTS voice presets.
 File: app/services/annotator_service.py
 Orchestrated by: director_service.run_pipeline()
 LLM model: Claude Opus (claude-opus-4-20250514)
+Tool: compile_manim (Manim compile-and-verify)
 
 This is the most complex LLM agent in the system. It writes complete Python
 code for each segment's animation — not pseudocode, not hints, but actual
-executable Manim construct() method bodies.
+executable Manim construct() method bodies. It operates as a tool-use agentic
+loop: Claude generates code, calls a compile_manim tool to test it, reads any
+errors, fixes them, and retries — up to 3 compile attempts per segment.
 
 --- What the Annotator Receives ---
 
@@ -529,14 +538,63 @@ delay between calls to avoid rate limits. For each segment:
      - Exact match first
      - Partial case-insensitive match second
      - All source text (truncated to 4000 chars) as last resort
-  2. Call _generate_manim_code() with Claude Opus
+  2. Call _generate_manim_code() with Claude Opus in a tool-use agentic loop
      - max_tokens=8192 (animation code can be long)
      - System prompt cached with cache_control: {"type": "ephemeral"}
-  3. Extract code from response (strip markdown fences if present)
-  4. Validate: code must contain self.play, self.wait, or self.add
-  5. On failure: fall back to a simple title card (FadeIn → wait → FadeOut)
-  6. Store code in segment.manim_code
-  7. Create a minimal AnimationHint for UI badge display
+     - tools=[COMPILE_TOOL] — Claude has access to a compile_manim tool
+  3. Claude writes code and calls compile_manim to test it:
+     a. _execute_compile_tool() wraps the code with _wrap_scene() from
+        animation_service and renders via _render_scene_sync() using the
+        shared ProcessPoolExecutor
+     b. On success: returns {"success": true} and caches the rendered MP4
+        directly to data/animations/{paper_id}/segment_NNNN.mp4
+     c. On failure: returns {"success": false, "error": "..."} (truncated
+        to 1500 chars). The error message is fed back to Claude.
+  4. If compilation fails, Claude reads the error, fixes the code, and
+     retries. Up to MAX_COMPILE_ATTEMPTS=3 compile attempts per segment.
+  5. If all compile attempts fail, the last attempted code is returned
+     as-is (will be retried by the animation renderer in Phase 4, with
+     title card fallback on failure).
+  6. If Claude finishes with stop_reason="end_turn" (chose not to use the
+     tool), code is extracted from the text response as before.
+  7. Validate: code must contain self.play, self.wait, or self.add
+  8. On empty or invalid code: fall back to a simple title card
+  9. Store code in segment.manim_code
+  10. Create a minimal AnimationHint for UI badge display
+
+--- The compile_manim Tool ---
+
+The tool schema is defined as the COMPILE_TOOL constant:
+  name: "compile_manim"
+  input_schema: { construct_body: string (required) }
+
+The tool execution function _execute_compile_tool():
+  - Imports _wrap_scene and _render_scene_sync from animation_service
+  - Wraps the construct body in a full Scene class
+  - Renders via Manim CLI in the shared ProcessPoolExecutor (same executor
+    used later by Phase 4, max_workers=1)
+  - If paper_id and segment_index are provided (normal path), the output
+    MP4 is written directly to data/animations/{paper_id}/segment_NNNN.mp4
+  - This means Phase 4's render_segment() will find the file already exists
+    and skip rendering entirely (line 181: if output_path.exists(): return)
+  - On render error, the exception message is captured and returned to Claude
+
+--- Caching Behavior ---
+
+Successfully compiled animations are cached as a side effect of the compile
+tool. This eliminates redundant work in Phase 4:
+
+  During annotation (Phase 2c):
+    compile_manim succeeds → MP4 written to data/animations/{paper_id}/
+  During rendering (Phase 4):
+    render_segment() checks if output_path.exists() → returns immediately
+
+Cache invalidation:
+  - run_pipeline(): No prior animations exist, so no stale cache conflicts
+  - run_reannotate(): _clear_renders() deletes the animations directory
+    before re-annotating, clearing any previously cached MP4s
+  - run_from_script(): Only re-renders, doesn't re-annotate. Deletes the
+    animations directory before Phase 4 so cached files don't interfere
 
 --- Why Claude Opus and Not Sonnet ---
 
@@ -628,16 +686,18 @@ The renderer uses a ProcessPoolExecutor with max_workers=1. This is because
 Manim rendering is CPU-intensive and memory-heavy, and running multiple
 renders in parallel on a single machine would cause thrashing.
 
---- Why Not Pre-validate the Code? ---
+--- Pre-compilation in Phase 2c ---
 
-The system intentionally does NOT try to parse or validate the LLM-generated
-Python code before rendering. This is because:
-  1. The code uses Manim-specific APIs that can't be validated without
-     importing the full Manim library
-  2. Many render failures are runtime errors (wrong coordinates, missing
-     objects) that can't be caught by static analysis
-  3. The fallback title card is a reliable safety net
-  4. Attempting validation would add complexity without much benefit
+As of the compile-tool update, the annotator agent (Phase 2c) now pre-compiles
+code during generation via the compile_manim tool. This means most segments
+arrive at Phase 4 with a cached MP4 already on disk. render_segment() checks
+if output_path.exists() (line 181) and returns immediately for these segments.
+
+Segments that failed all 3 compile attempts during Phase 2c still carry their
+last-attempt code in segment.manim_code. Phase 4 tries to render this code
+one more time (different process, clean state), falling back to the title card
+if it still fails. This double-attempt approach maximizes success rate while
+keeping the title card as an ultimate safety net.
 
 
 ================================================================================
@@ -1013,13 +1073,18 @@ LLM and rendering failures:
   1. Claude Sonnet → retry with prefilled "[" → OpenAI gpt-4o → raw text
   2. Aggregator: Claude Opus → OpenAI gpt-4o → use raw section drafts
 
---- Annotator Fallbacks ---
-  1. Claude Opus code → extract and validate → title card on failure
-  2. Code must contain self.play/self.wait/self.add or falls back to title card
+--- Annotator Fallbacks (with compile tool) ---
+  1. Claude Opus generates code → calls compile_manim tool to test it
+  2. On compile failure: Claude reads error, fixes code, retries (up to 3x)
+  3. On successful compile: MP4 cached to animations dir, code returned
+  4. After 3 failed compiles: last attempted code returned as-is
+  5. If Claude skips the tool (end_turn): code extracted from text response
+  6. Code must contain self.play/self.wait/self.add or falls back to title card
 
 --- Animation Rendering Fallbacks ---
-  1. Render LLM-generated code → on any exception → render title card
-  2. Title card is a simple FadeIn/wait/FadeOut that always succeeds
+  1. If MP4 already exists (pre-compiled in Phase 2c) → skip, return path
+  2. Otherwise render LLM-generated code → on any exception → render title card
+  3. Title card is a simple FadeIn/wait/FadeOut that always succeeds
 
 --- Compositor Fallbacks ---
   1. Missing video or audio files → segment silently skipped
@@ -1053,11 +1118,14 @@ LLM and rendering failures:
    prosody across segment boundaries. Per-segment TTS would create
    unnatural pauses and inconsistent speaking rhythm.
 
-3. LLM-generated code instead of template translation
+3. LLM-generated code with compile-and-fix loop
    The annotator writes raw Manim Python code rather than producing
    structured data that gets translated into code. This gives the LLM
    maximum creative freedom but means render failures are possible.
-   The title card fallback makes this trade-off acceptable.
+   The compile_manim tool lets Claude test and fix its code in-context
+   (up to 3 attempts), dramatically reducing title-card fallback rates.
+   Successfully compiled MP4s are cached to the animations directory,
+   so Phase 4 skips them entirely.
 
 4. Claude Opus for annotation, Sonnet for scripting
    Opus is used for the hardest task (writing correct, creative Manim code)

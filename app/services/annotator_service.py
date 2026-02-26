@@ -335,8 +335,8 @@ async def annotate_script(
         if i > 0:
             await asyncio.sleep(0.5)  # Stagger to avoid rate limits
 
-        # Estimated duration for timing guidance
-        duration = segment.estimated_duration_seconds or 20.0
+        # Use actual audio duration (voiceover runs before annotation now)
+        duration = segment.actual_duration_seconds or segment.estimated_duration_seconds or 20.0
 
         # Find the best matching source text for this segment
         paper_source = source_by_title.get(segment.section_title, "")

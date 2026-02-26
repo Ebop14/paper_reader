@@ -91,7 +91,7 @@ const UI = {
     renderPipelineStages(currentStage, status) {
         const container = this.$('pipeline-stages');
         container.style.display = 'flex';
-        const stages = ['loading', 'scripting', 'annotating', 'voiceover', 'animation', 'compositing', 'done'];
+        const stages = ['loading', 'scripting', 'voiceover', 'annotating', 'animation', 'compositing', 'done'];
         const currentIdx = stages.indexOf(currentStage);
 
         stages.forEach((stage, i) => {

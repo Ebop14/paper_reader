@@ -58,7 +58,17 @@ async def run_pipeline(
         )
         script = await write_script(paper_id, meta, chunk_groups, task_id)
 
-        # Phase 2b: Annotation (word-anchored animation hints)
+        # Phase 2b: Voiceover (generate audio FIRST so we get real durations)
+        update_task(
+            task_id,
+            stage="voiceover",
+            stage_progress=0.0,
+            message="Starting voiceover generation...",
+        )
+        script = await generate_voiceover(paper_id, script, voice, speed, task_id)
+        _save_script(paper_id, script)
+
+        # Phase 2c: Annotation (uses actual audio durations from voiceover)
         update_task(
             task_id,
             stage="annotating",
@@ -68,21 +78,11 @@ async def run_pipeline(
         script = await annotate_script(script, meta, chunk_groups, task_id)
         _save_script(paper_id, script)
 
-        # Phase 2c: Validate and repair animation hints
+        # Phase 2d: Validate and repair animation hints
         update_task(task_id, message="Validating animation hints...")
         segment_dicts = [s.model_dump() for s in script.segments]
         repaired = validate_and_repair_hints(segment_dicts)
         script.segments = [ScriptSegment(**s) for s in repaired]
-        _save_script(paper_id, script)
-
-        # Phase 3: Voiceover
-        update_task(
-            task_id,
-            stage="voiceover",
-            stage_progress=0.0,
-            message="Starting voiceover generation...",
-        )
-        script = await generate_voiceover(paper_id, script, voice, speed, task_id)
         _save_script(paper_id, script)
 
         # Phase 4: Animation rendering

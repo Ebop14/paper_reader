@@ -12,7 +12,7 @@ from app.tasks.processing import task_registry, create_task, sse_stream
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
-PIPELINE_STAGES = ["loading", "scripting", "annotating", "voiceover", "animation", "compositing", "done"]
+PIPELINE_STAGES = ["loading", "scripting", "voiceover", "annotating", "animation", "compositing", "done"]
 RENDER_STAGES = ["loading", "animation", "compositing", "done"]
 REANNOTATE_STAGES = ["loading", "annotating", "animation", "compositing", "done"]
 

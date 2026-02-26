@@ -84,6 +84,34 @@ The Manim frame is 14.2 × 8 units. Objects outside the safe zone are clipped or
             group.scale_to_fit_height(7)
 ```
 
+**Text placement & collision avoidance**:
+Text objects have real width and height. Estimate bounding boxes before placing:
+- font_size 36 → each character ≈ 0.35 units wide, line height ≈ 0.7 units
+- font_size 26 → each character ≈ 0.25 units wide, line height ≈ 0.5 units
+- font_size 22 → each character ≈ 0.21 units wide, line height ≈ 0.42 units
+- font_size 16 → each character ≈ 0.15 units wide, line height ≈ 0.3 units
+
+Label placement rules (for axes, bar charts, diagrams):
+- For bar/column labels: alternate UP and DOWN to avoid overlap. E.g., even-index labels go below (DOWN), odd-index labels go above (UP).
+- Always use `buff=0.4` or larger in `.next_to()` calls for labels — never use buff < 0.3.
+- For y-axis labels, use `LEFT, buff=0.2` and keep labels ≤ 4 characters.
+- For x-axis labels, stagger vertically or angle text if > 4 labels.
+
+Annotation placement rules:
+- Spread annotations to different compass directions (UP, DOWN, LEFT, RIGHT) — never stack multiple annotations in the same direction from a shared reference.
+- Keep annotation text ≤ 20 characters. Longer? Abbreviate or use a numbered legend.
+- If placing arrows + labels next to objects, always check: will the label's right edge exceed x=6.5 or left edge go below x=-6.5?
+
+Post-placement collision check — use this pattern after building any group of labeled objects:
+```
+        # Verify no overlaps: check that label centers are ≥ 0.5 units apart
+        labels = [label_1, label_2, label_3]
+        for j in range(len(labels)):
+            for k in range(j + 1, len(labels)):
+                if abs(labels[j].get_center()[1] - labels[k].get_center()[1]) < 0.5:
+                    labels[k].shift(DOWN * 0.5)
+```
+
 **Common traps to AVOID**:
 - BulletedList with long items overflows right. Prefer VGroup of short Text items with arrange(DOWN).
 - Chained .next_to() calls accumulate offset — check final position with .get_center().
@@ -98,6 +126,9 @@ The Manim frame is 14.2 × 8 units. Objects outside the safe zone are clipped or
 - MathTex/Tex/add_coordinates()/include_numbers crash due to LaTeX. Use Text() with Unicode instead.
 - Pointless try/except: wrapping Text() in try/except with an identical fallback does nothing. Only use try/except when the try and except bodies are DIFFERENT (e.g. MathTex → Text fallback, but since we ban MathTex, this is rarely needed).
 - BarChart class requires LaTeX for labels — use manual Rectangle + Text bar charts instead.
+- Bar chart value labels all placed with `.next_to(bar, UP)` overlap when bars are close together. Alternate UP/DOWN or use small font_size ≤ 16.
+- Annotations at screen edges: if an object is at x > 4.5, do NOT place annotations to its RIGHT — they'll be clipped. Use UP, DOWN, or LEFT instead.
+- Multiple `.next_to(obj, UP)` calls on different labels from nearby objects stack them at the same y-coordinate, causing overlap. Stagger with incremental `shift(UP * 0.4 * i)`.
 
 ## Available API
 
@@ -137,6 +168,14 @@ Follow the VISUAL_STRATEGY hint to choose the right layout. Every segment MUST h
 **equation**: Center the key equation using Text() with Unicode math symbols (², ³, ∑, ∈, ≤, ≥, →, ×, ÷, π, θ, α, β, λ). Surround with annotating arrows/braces pointing to terms with Text labels explaining each part. Animate: show equation → highlight and label each term sequentially.
 
 **auto** (fallback): Analyze the narration content and pick the most appropriate pattern from above. Qualitative content → concept_map or metaphor. Quantitative → data_chart. Sequential → process_flow.
+
+## Duration filling
+Your animations will likely finish before the voiceover ends. The compositor will freeze the last frame, but a static freeze looks bad. Plan for this:
+1. After all animations finish, calculate remaining time: `remaining = DURATION - (sum of all run_times and waits so far)`.
+2. If remaining > 1 second, add `self.wait(remaining - 1.0)` to hold the final visual.
+3. As the very last action, fade out all remaining objects: `self.play(FadeOut(*self.mobjects), run_time=1.0)`.
+4. This ensures the scene ends on a clean black frame rather than a frozen mid-animation state.
+5. Spread `self.wait()` pauses throughout the animation, not just at the end — this looks more natural.
 
 ## Style guide
 - Use progressive reveal: build up complexity step by step

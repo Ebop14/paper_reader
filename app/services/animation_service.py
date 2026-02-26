@@ -73,13 +73,75 @@ def _render_scene_sync(scene_code: str, output_path: str) -> str:
 # Scene code builders
 # =====================================================================
 
+def _normalize_indent(code: str) -> str:
+    """Ensure every non-blank line has at least 8 spaces of indentation.
+
+    LLM-generated code sometimes comes back with no indentation, or with
+    4-space indentation.  We need exactly 8 spaces (inside `def construct`).
+
+    Uses the most common (mode) base indentation rather than the minimum,
+    so a single mis-indented line doesn't skew the whole block.
+    """
+    lines = code.split("\n")
+    target = 8
+
+    # Count indentation of each non-blank, non-comment-only line
+    indent_counts: dict[int, int] = {}
+    for line in lines:
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        indent = len(line) - len(stripped)
+        indent_counts[indent] = indent_counts.get(indent, 0) + 1
+
+    if not indent_counts:
+        return code  # all blank
+
+    # The base indent is the most common indentation level
+    base_indent = max(indent_counts, key=indent_counts.get)
+
+    # If there are lines with LESS indent than the mode, they're outliers
+    # that lost their indentation. We'll fix those individually.
+    delta = target - base_indent
+
+    if delta == 0:
+        # Base is already correct; just fix any outlier lines that have
+        # less than 8 spaces (they lost their indent).
+        result = []
+        for line in lines:
+            stripped = line.lstrip()
+            if not stripped:
+                result.append("")
+                continue
+            cur_indent = len(line) - len(stripped)
+            if cur_indent < target:
+                # Outlier — give it the target indent
+                result.append(" " * target + stripped)
+            else:
+                result.append(line)
+        return "\n".join(result)
+
+    # Shift everything so the base lands on target=8
+    result = []
+    for line in lines:
+        stripped = line.lstrip()
+        if not stripped:
+            result.append("")
+            continue
+        cur_indent = len(line) - len(stripped)
+        new_indent = max(target, cur_indent + delta)
+        result.append(" " * new_indent + stripped)
+    return "\n".join(result)
+
+
 def _wrap_scene(construct_body: str) -> str:
     """Wrap a construct() body in a full scene file."""
+    normalized = _normalize_indent(construct_body)
     return (
         "from manim import *\n\n"
         "class SegmentScene(Scene):\n"
         "    def construct(self):\n"
-        f"{construct_body}\n"
+        f"{normalized}\n"
     )
 
 

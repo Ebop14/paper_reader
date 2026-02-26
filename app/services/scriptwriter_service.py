@@ -65,6 +65,24 @@ For EACH segment, assign one visual_strategy value based on what the narration d
 
 For "metaphor" and "concept_map" segments, you MUST write a concrete visual description in speaker_notes that the animator can use.
 
+## TTS pacing rules (CRITICAL for audio quality)
+The narration will be read by a text-to-speech engine, not a human. Follow these rules for natural-sounding output:
+- **Short sentences**: 8-15 words each. The TTS engine handles short sentences much more clearly.
+- **Complete thoughts**: End every segment with a complete sentence. Never leave a thought dangling across segment boundaries.
+- **No parenthetical asides**: Avoid em-dashes, parentheses, and nested clauses — the TTS engine stumbles on these. Rewrite as separate sentences.
+- **Avoid abbreviations**: Write "for example" not "e.g.", "that is" not "i.e.", "approximately" not "approx."
+- **Numbers**: Write small numbers as words ("three layers") and large ones as digits ("1.5 million parameters").
+
+## Transition variety
+Never repeat the same transition pattern in consecutive segments. Rotate among these devices:
+- **Contrast**: "But", "However", "On the other hand", "Unlike previous approaches"
+- **Cause/consequence**: "As a result", "This means that", "Because of this"
+- **Sequence**: "Building on this", "The next step", "From here"
+- **Surprise/pivot**: "Here's where it gets interesting", "But there's a catch", "Surprisingly"
+- **Question**: "So how does this actually work?", "But does this hold up in practice?"
+
+Place transition phrases at the START of the next segment, not the end of the current one. This gives each segment a clean ending and a strong opening.
+
 ## Output
 animation_hints MUST be an empty array [] — a separate annotator handles visuals.
 
@@ -249,7 +267,7 @@ async def _call_aggregator_claude(paper_title: str, all_segments: list[dict]) ->
 
     result = ""
     async with client.messages.stream(
-        model="claude-sonnet-4-20250514",
+        model="claude-opus-4-20250514",
         max_tokens=16384,
         system=[{
             "type": "text",
@@ -268,7 +286,7 @@ async def _call_aggregator_claude(paper_title: str, all_segments: list[dict]) ->
     # Retry once
     result = ""
     async with client.messages.stream(
-        model="claude-sonnet-4-20250514",
+        model="claude-opus-4-20250514",
         max_tokens=16384,
         system=[{
             "type": "text",

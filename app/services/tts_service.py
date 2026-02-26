@@ -56,11 +56,13 @@ def _generate_sync(text: str, voice: str, speed: float, out_dir: str, file_prefi
 async def generate_chunk(
     paper_id: str, chunk_index: int, text: str,
     voice: str = "serena", speed: float = 1.0,
+    file_prefix: str | None = None,
 ) -> Path:
     """Generate TTS audio for a single text chunk. Returns path to WAV file."""
     out_dir = audio_dir() / paper_id
     out_dir.mkdir(parents=True, exist_ok=True)
-    file_prefix = f"chunk_{chunk_index:04d}"
+    if file_prefix is None:
+        file_prefix = f"chunk_{chunk_index:04d}"
     output_path = out_dir / f"{file_prefix}.wav"
 
     if output_path.exists():

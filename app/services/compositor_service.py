@@ -19,6 +19,20 @@ async def _run_ffmpeg(args: list[str]) -> None:
         raise RuntimeError(f"ffmpeg failed: {stderr.decode()[-500:]}")
 
 
+async def _probe_duration(file_path: Path) -> float:
+    """Get duration of an audio/video file in seconds via ffprobe."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "quiet",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(file_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, _ = await proc.communicate()
+    return float(stdout.decode().strip())
+
+
 async def _combine_segment(
     video_path: Path,
     audio_path: Path,
@@ -26,21 +40,26 @@ async def _combine_segment(
 ) -> None:
     """Mux one video + one audio into a single MP4.
 
-    Loops the video if it's shorter than the audio so no speech is cut off.
-    Re-encodes video (ultrafast preset) to support the loop + trim.
+    If the animation is shorter than the audio, freezes the last frame
+    (via tpad) instead of looping. Uses explicit -t from the audio duration
+    so the audio is never truncated.
     """
+    audio_dur = await _probe_duration(audio_path)
+
     await _run_ffmpeg([
         "-y",
-        "-stream_loop", "-1",       # loop video indefinitely
         "-i", str(video_path),
         "-i", str(audio_path),
-        "-map", "0:v", "-map", "1:a",
+        "-filter_complex",
+        # Freeze last frame long enough to cover the full audio
+        f"[0:v]tpad=stop_mode=clone:stop_duration={audio_dur + 1:.2f}[v]",
+        "-map", "[v]", "-map", "1:a",
         "-c:v", "libx264",
         "-preset", "ultrafast",
         "-crf", "28",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
-        "-shortest",                 # trim to audio length (video loops past it)
+        "-t", f"{audio_dur:.3f}",   # exact audio length — never cut short
         str(output_path),
     ])
 

@@ -89,6 +89,7 @@ class ScriptSegment(BaseModel):
     visual_strategy: str = ""
     animation_hints: list[AnimationHint] = Field(default_factory=list)
     manim_code: str = ""  # Raw Manim construct() body written by LLM
+    tts_chunks: list[str] = Field(default_factory=list)  # Sub-chunks of narration for smoother TTS
     estimated_duration_seconds: float = 0.0
     actual_duration_seconds: float | None = None
     audio_file: str | None = None
